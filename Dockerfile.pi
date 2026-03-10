@@ -1,0 +1,40 @@
+# Multi-stage ARM64 build optimized for Raspberry Pi 5
+# Stage 1: Build dependencies
+FROM python:3.11-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libatlas-base-dev \
+    libhdf5-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements_pi.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements_pi.txt
+
+# Stage 2: Runtime (minimal)
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libatlas3-base \
+    libhdf5-103-1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
+COPY . .
+RUN mkdir -p data models logs
+
+ENV PYTHONUNBUFFERED=1
+ENV TF_CPP_MIN_LOG_LEVEL=3
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV MALLOC_TRIM_THRESHOLD_=100000
+
+EXPOSE 8501
+
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)"
+
+CMD ["python", "main.py", "--config", "config_pi.json", "--use-best"]

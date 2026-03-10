@@ -1,0 +1,43 @@
+[Unit]
+Description=RichBot Grid Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/richbot
+ExecStart=/home/pi/richbot/.venv/bin/python main.py --config config_pi.json --use-best
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Memory limits (512MB hard, 384MB soft)
+MemoryMax=512M
+MemoryHigh=384M
+
+# CPU weight (lower = less priority than system tasks)
+CPUWeight=80
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=richbot
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=TF_CPP_MIN_LOG_LEVEL=3
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=MALLOC_TRIM_THRESHOLD_=100000
+EnvironmentFile=-/home/pi/richbot/.env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/richbot/data /home/pi/richbot/logs /home/pi/richbot/models
+
+[Install]
+WantedBy=multi-user.target

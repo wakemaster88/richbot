@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+*.db
+data/
+models/
+logs/
+config_best.json
+.venv/
+venv/
+*.keras
+*.h5

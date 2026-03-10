@@ -1,0 +1,84 @@
+version: "3.8"
+
+# Pi-optimized compose: memory limits, restart policies, healthchecks
+services:
+  richbot:
+    build:
+      context: .
+      dockerfile: Dockerfile.pi
+    container_name: richbot-pi
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    environment:
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - EXCHANGE_SANDBOX=${EXCHANGE_SANDBOX:-true}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - MALLOC_TRIM_THRESHOLD_=100000
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./config_pi.json:/app/config_pi.json:ro
+      - ./config_best.json:/app/config_best.json:ro
+    command: python main.py --config config_pi.json --use-best
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.pi
+    container_name: richbot-dashboard-pi
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 128M
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+      - ./config_pi.json:/app/config_pi.json:ro
+    command: >
+      streamlit run dashboard/streamlit_app.py
+      --server.port 8501
+      --server.address 0.0.0.0
+      --server.maxUploadSize 5
+      --browser.gatherUsageStats false
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "2m"
+        max-file: "1"
+
+  optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile.pi
+    container_name: richbot-optimizer-pi
+    profiles: ["optimize"]
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    environment:
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - EXCHANGE_SANDBOX=${EXCHANGE_SANDBOX:-true}
+    volumes:
+      - ./data:/app/data
+      - ./config_pi.json:/app/config_pi.json:ro
+    command: python main.py --config config_pi.json --optimize --trials 50

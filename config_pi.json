@@ -1,0 +1,82 @@
+{
+  "exchange": {
+    "name": "binance",
+    "api_key": "",
+    "api_secret": "",
+    "sandbox": true,
+    "rate_limit": true
+  },
+  "pairs": ["BTC/USDT"],
+  "grid": {
+    "grid_count": 12,
+    "spacing_percent": 0.5,
+    "amount_per_order": 0.001,
+    "range_multiplier": 1.0,
+    "infinity_mode": true,
+    "trail_trigger_percent": 1.5
+  },
+  "atr": {
+    "period": 14,
+    "timeframe": "1h",
+    "multiplier": 2.0
+  },
+  "risk": {
+    "kelly_fraction": 0.25,
+    "max_drawdown_percent": 8.0,
+    "trailing_stop_percent": 1.0,
+    "max_position_percent": 30.0,
+    "min_order_amount": 0.0001,
+    "volatility_scaling": true
+  },
+  "ml": {
+    "enabled": true,
+    "confidence_threshold": 0.70,
+    "retrain_interval_hours": 72,
+    "lookback_days": 60,
+    "prediction_interval_minutes": 30,
+    "timeframes": ["1h"]
+  },
+  "optimizer": {
+    "n_trials": 50,
+    "study_name": "grid_bot_optimization",
+    "db_path": "data/optuna_study.db",
+    "backtest_days": 30
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "",
+    "chat_id": "",
+    "alert_on_fill": true,
+    "alert_on_range_shift": true,
+    "alert_on_drawdown": true,
+    "daily_report": true
+  },
+  "websocket": {
+    "enabled": true,
+    "reconnect_delay": 5,
+    "max_reconnect_attempts": 50,
+    "ping_interval": 30
+  },
+  "dashboard": {
+    "port": 8501,
+    "refresh_interval": 15
+  },
+  "logging": {
+    "level": "WARNING",
+    "file": "logs/richbot.log",
+    "max_bytes": 5242880,
+    "backup_count": 2
+  },
+  "database": {
+    "path": "data/richbot.db"
+  },
+  "pi": {
+    "enabled": true,
+    "memory_limit_mb": 512,
+    "gc_interval_seconds": 300,
+    "equity_history_limit": 2000,
+    "ohlcv_fetch_limit": 300,
+    "use_tflite": true,
+    "numpy_float32": true
+  }
+}

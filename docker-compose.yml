@@ -1,0 +1,59 @@
+version: "3.8"
+
+services:
+  richbot:
+    build: .
+    container_name: richbot
+    restart: unless-stopped
+    environment:
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - EXCHANGE_SANDBOX=${EXCHANGE_SANDBOX:-true}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./config.json:/app/config.json:ro
+      - ./config_best.json:/app/config_best.json:ro
+    command: python main.py --use-best
+
+  dashboard:
+    build: .
+    container_name: richbot-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+      - ./config.json:/app/config.json:ro
+    command: streamlit run dashboard/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+
+  optimizer:
+    build: .
+    container_name: richbot-optimizer
+    profiles: ["optimize"]
+    environment:
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - EXCHANGE_SANDBOX=${EXCHANGE_SANDBOX:-true}
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+    command: python main.py --optimize --trials 200
+
+  trainer:
+    build: .
+    container_name: richbot-trainer
+    profiles: ["train"]
+    environment:
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - EXCHANGE_SANDBOX=${EXCHANGE_SANDBOX:-true}
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./config.json:/app/config.json:ro
+    command: python main.py --train-ml

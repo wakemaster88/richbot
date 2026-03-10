@@ -1,0 +1,22 @@
+# RichBot Pi 5 — Lightweight dependencies
+# Full TensorFlow replaced with tflite-runtime for inference
+# Training must be done on desktop/cloud, then deploy .tflite to Pi
+
+ccxt>=4.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+pandas-ta>=0.3.14b
+tflite-runtime>=2.14.0
+optuna>=3.5.0
+joblib>=1.3.0
+python-telegram-bot>=20.0
+streamlit>=1.30.0
+plotly>=5.18.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+SQLAlchemy>=2.0.0
+python-dotenv>=1.0.0
+
+# Note: ccxt[pro] requires aiohttp which is included
+# Install aiohttp separately if ccxt[pro] fails on ARM64:
+aiohttp>=3.9.0
