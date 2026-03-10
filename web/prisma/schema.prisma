@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+model Heartbeat {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  timestamp DateTime @default(now())
+  status    String
+  pairs     Json     @default("[]")
+  uptime    Int      @default(0)
+  memory    Json?
+  metrics   Json?
+
+  @@index([botId, timestamp(sort: Desc)])
+  @@map("heartbeats")
+}
+
+model Command {
+  id          String    @id @default(uuid())
+  botId       String    @map("bot_id")
+  type        String
+  payload     Json?
+  status      String    @default("pending")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  processedAt DateTime? @map("processed_at")
+  result      Json?
+
+  @@index([botId, status])
+  @@map("commands")
+}
+
+model Trade {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  timestamp DateTime
+  pair      String
+  side      String
+  price     Float
+  amount    Float
+  fee       Float
+  pnl       Float
+  gridLevel Float?   @map("grid_level")
+  orderId   String?  @map("order_id")
+
+  @@index([botId, pair, timestamp(sort: Desc)])
+  @@map("trades")
+}
+
+model EquitySnapshot {
+  id            String   @id @default(uuid())
+  botId         String   @map("bot_id")
+  timestamp     DateTime @default(now())
+  pair          String
+  equity        Float
+  unrealizedPnl Float    @default(0) @map("unrealized_pnl")
+
+  @@index([botId, pair, timestamp(sort: Desc)])
+  @@map("equity_snapshots")
+}
+
+model BotStatus {
+  id            String   @id @default(uuid())
+  botId         String   @unique @map("bot_id")
+  status        String
+  lastHeartbeat DateTime @default(now()) @map("last_heartbeat")
+  pairs         Json     @default("[]")
+  pairStatuses  Json     @default("{}") @map("pair_statuses")
+  startedAt     DateTime @default(now()) @map("started_at")
+  version       String   @default("2.0")
+
+  @@map("bot_statuses")
+}
+
+model BotConfig {
+  id        String   @id @default(uuid())
+  botId     String   @unique @map("bot_id")
+  config    Json
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("bot_configs")
+}

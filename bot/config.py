@@ -89,6 +89,18 @@ class WebSocketConfig:
 
 
 @dataclass
+class CloudConfig:
+    """Neon Postgres cloud sync for Vercel dashboard."""
+    enabled: bool = False
+    database_url: str = ""
+    bot_id: str = "richbot-pi"
+    heartbeat_interval: int = 30
+    command_poll_interval: int = 5
+    sync_trades: bool = True
+    sync_equity: bool = True
+
+
+@dataclass
 class PiConfig:
     """Raspberry Pi specific resource limits."""
     enabled: bool = False
@@ -120,6 +132,7 @@ class BotConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
     pi: PiConfig = field(default_factory=PiConfig)
+    cloud: CloudConfig = field(default_factory=CloudConfig)
     logging_cfg: LoggingConfig = field(default_factory=LoggingConfig)
     db_path: str = "data/richbot.db"
     log_level: str = "INFO"
@@ -164,6 +177,8 @@ class BotConfig:
             )
         if "pi" in data:
             cfg.pi = PiConfig(**data["pi"])
+        if "cloud" in data:
+            cfg.cloud = CloudConfig(**data["cloud"])
         return cfg
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,6 +196,9 @@ def _apply_env_overrides(cfg: BotConfig) -> BotConfig:
         "TELEGRAM_BOT_TOKEN": lambda v: setattr(cfg.telegram, "bot_token", v),
         "TELEGRAM_CHAT_ID": lambda v: setattr(cfg.telegram, "chat_id", v),
     }
+    env_map["NEON_DATABASE_URL"] = lambda v: setattr(cfg.cloud, "database_url", v)
+    env_map["CLOUD_BOT_ID"] = lambda v: setattr(cfg.cloud, "bot_id", v)
+    env_map["CLOUD_ENABLED"] = lambda v: setattr(cfg.cloud, "enabled", v.lower() == "true")
     for env_key, setter in env_map.items():
         val = os.environ.get(env_key)
         if val:

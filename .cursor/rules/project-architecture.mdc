@@ -1,0 +1,41 @@
+---
+description: RichBot project architecture — Pi bot + Neon DB + Vercel dashboard
+alwaysApply: true
+---
+
+# RichBot Architecture
+
+Grid trading bot running on Raspberry Pi, controlled via Vercel dashboard through Neon Postgres.
+
+## Data Flow
+
+```
+Raspberry Pi (bot/)          Neon Postgres              Vercel (web/)
+─────────────────           ─────────────              ──────────────
+main.py → MultiPairBot  ──► heartbeats, trades,    ◄── Next.js API routes
+  ├─ PairBot (per pair)      equity_snapshots,          ├─ GET /api/status
+  ├─ CloudSync (asyncpg)     bot_statuses,              ├─ GET /api/trades
+  ├─ GridEngine              bot_configs                 ├─ GET /api/equity
+  ├─ OrderManager        ◄── commands (pending)         └─ POST /api/commands
+  └─ TelegramNotifier                                  Prisma ORM
+```
+
+## Key Invariants
+
+- Pi bot is autonomous: runs even if cloud/Vercel is down
+- CloudSync uses asyncpg directly; Vercel uses Prisma — both share same Postgres tables
+- All cloud operations are fire-and-forget with try/except (never crash the bot)
+- bot_id links Pi and dashboard — must match in config.json and Vercel env vars
+- Local SQLite (data/richbot.db) is always the primary data store; Neon is a mirror
+
+## Config Hierarchy
+
+1. `config.json` / `config_pi.json` — base config
+2. `config_best.json` — optimizer output (--use-best)
+3. Environment variables override: EXCHANGE_*, TELEGRAM_*, NEON_DATABASE_URL, CLOUD_*
+4. `bot_configs` table in Neon — dashboard can push config changes
+
+## Tables (Neon Postgres)
+
+heartbeats, commands, trades, equity_snapshots, bot_statuses, bot_configs
+Schema defined in: `web/prisma/schema.prisma` and `scripts/neon_schema.sql`

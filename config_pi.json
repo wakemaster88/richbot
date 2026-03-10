@@ -70,6 +70,15 @@
   "database": {
     "path": "data/richbot.db"
   },
+  "cloud": {
+    "enabled": true,
+    "database_url": "",
+    "bot_id": "richbot-pi",
+    "heartbeat_interval": 30,
+    "command_poll_interval": 5,
+    "sync_trades": true,
+    "sync_equity": true
+  },
   "pi": {
     "enabled": true,
     "memory_limit_mb": 512,

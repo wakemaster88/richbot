@@ -61,6 +61,15 @@
     "port": 8501,
     "refresh_interval": 5
   },
+  "cloud": {
+    "enabled": false,
+    "database_url": "",
+    "bot_id": "richbot-pi",
+    "heartbeat_interval": 30,
+    "command_poll_interval": 5,
+    "sync_trades": true,
+    "sync_equity": true
+  },
   "logging": {
     "level": "INFO",
     "file": "logs/richbot.log"

@@ -1,0 +1,46 @@
+---
+description: Python bot coding conventions for Pi-compatible async trading bot
+globs: bot/**/*.py,main.py
+alwaysApply: false
+---
+
+# Python Bot Conventions
+
+## Async Pattern
+
+All I/O is async via asyncio. Background loops pattern:
+
+```python
+async def _some_loop(self):
+    while self._running:
+        try:
+            await self._do_work()
+        except Exception as e:
+            logger.warning("Loop error: %s", e)
+        await asyncio.sleep(interval)
+```
+
+## Pi Awareness
+
+- Check `config.is_pi` for resource-constrained paths
+- Use bounded buffers (equity_history_limit, ohlcv_fetch_limit)
+- Periodic GC via `_gc_loop` when on Pi
+- TFLite instead of TensorFlow on Pi
+
+## CloudSync Integration
+
+- CloudSync calls are always guarded: `if self.cloud and self.cloud.connected:`
+- Never await cloud operations in hot paths — use `asyncio.create_task()`
+- Trade sync happens in `_on_fill`, equity sync in `update_equity`
+- Command handlers registered in `MultiPairBot._register_cloud_commands()`
+- New commands: add handler in `_register_cloud_commands` + add type to `validTypes` in `web/src/app/api/commands/route.ts`
+
+## Error Handling
+
+- Use `logger.warning` for recoverable cloud/network errors
+- Use `logger.error` for exchange/trading errors
+- Never let cloud failures propagate to trading logic
+
+## Config Pattern
+
+Dataclasses in `bot/config.py`. New config section = new dataclass + add to `BotConfig` + add to `from_dict` + add env override in `_apply_env_overrides`.

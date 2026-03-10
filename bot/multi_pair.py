@@ -12,6 +12,7 @@ import time
 
 import pandas as pd
 
+from bot.cloud_sync import CloudSync
 from bot.config import BotConfig
 from bot.dynamic_range import compute_dynamic_range, detect_range_breakout, shift_range, RangeResult
 from bot.exchange import Exchange
@@ -31,7 +32,8 @@ class PairBot:
 
     def __init__(self, pair: str, config: BotConfig, exchange: Exchange,
                  risk_manager: RiskManager, tracker: PerformanceTracker,
-                 telegram: TelegramNotifier, ml_predictor: LSTMPredictor | None = None):
+                 telegram: TelegramNotifier, ml_predictor: LSTMPredictor | None = None,
+                 cloud: CloudSync | None = None):
         self.pair = pair
         self.config = config
         self.exchange = exchange
@@ -39,6 +41,7 @@ class PairBot:
         self.tracker = tracker
         self.telegram = telegram
         self.ml = ml_predictor
+        self.cloud = cloud
 
         self.grid = GridEngine(
             grid_count=config.grid.grid_count,
@@ -76,6 +79,9 @@ class PairBot:
                 managed_order.amount, managed_order.pnl,
             )
         )
+
+        if self.cloud and self.cloud.connected:
+            asyncio.create_task(self.cloud.sync_trade(trade))
 
     async def initialize(self):
         """Set up initial grid."""
@@ -189,6 +195,9 @@ class PairBot:
             usdt = balance.get("USDT", {}).get("total", 0)
             self.tracker.update_equity(self.pair, usdt)
 
+            if self.cloud and self.cloud.connected:
+                await self.cloud.sync_equity(self.pair, usdt)
+
             risk_status = self.risk.update_equity(usdt)
             if risk_status["is_paused"]:
                 await self.telegram.alert_drawdown_stop(
@@ -225,6 +234,7 @@ class MultiPairBot:
             pi_mode=config.is_pi,
         )
         self.telegram = TelegramNotifier(config.telegram)
+        self.cloud = CloudSync(config.cloud)
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
         self._running = False
@@ -233,6 +243,10 @@ class MultiPairBot:
         """Start trading all configured pairs."""
         logger.info("Starting multi-pair bot for %s", self.config.pairs)
 
+        await self.cloud.start()
+        self._register_cloud_commands()
+        await self.cloud.sync_config(self.config.to_dict())
+
         for pair in self.config.pairs:
             ml = None
             if self.config.ml.enabled:
@@ -240,7 +254,7 @@ class MultiPairBot:
                 pi_cfg = self.config.pi if self.config.is_pi else PiConfig()
                 ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
             bot = PairBot(pair, self.config, self.exchange, self.risk,
-                          self.tracker, self.telegram, ml)
+                          self.tracker, self.telegram, ml, self.cloud)
             self.pair_bots[pair] = bot
 
         for pair, bot in self.pair_bots.items():
@@ -339,6 +353,13 @@ class MultiPairBot:
         while self._running:
             for pair, bot in self.pair_bots.items():
                 await bot.update_equity()
+
+            if self.cloud.connected:
+                metrics = {}
+                for pair, bot in self.pair_bots.items():
+                    metrics[pair] = bot.get_status()
+                self.cloud.update_status("running", self.config.pairs, metrics)
+
             await asyncio.sleep(60)
 
     async def _daily_report_loop(self):
@@ -365,6 +386,7 @@ class MultiPairBot:
             await bot.order_mgr.cancel_all(pair)
         if self.ws:
             await self.ws.stop()
+        await self.cloud.stop()
         self.tracker.close()
         await self.exchange.close()
         logger.info("Multi-pair bot stopped")
@@ -378,3 +400,82 @@ class MultiPairBot:
     def resume(self):
         self.risk.resume()
         logger.info("Trading resumed across all pairs")
+
+    def _register_cloud_commands(self):
+        """Register command handlers for remote control from Vercel dashboard."""
+
+        async def cmd_stop(payload):
+            self._running = False
+            for pair, bot in self.pair_bots.items():
+                await bot.order_mgr.cancel_all(pair)
+            self.cloud.update_status("stopped", self.config.pairs, {})
+            return {"status": "stopped"}
+
+        async def cmd_resume(payload):
+            self.risk.resume()
+            self._running = True
+            self.cloud.update_status("running", self.config.pairs, {})
+            return {"status": "resumed"}
+
+        async def cmd_pause(payload):
+            self._running = False
+            self.cloud.update_status("paused", self.config.pairs, {})
+            return {"status": "paused"}
+
+        def cmd_status(payload):
+            return self.get_status()
+
+        def cmd_performance(payload):
+            return {"summaries": self.get_performance()}
+
+        def cmd_update_config(payload):
+            from bot.config import BotConfig
+            updated = []
+            if "grid" in payload:
+                for k, v in payload["grid"].items():
+                    if hasattr(self.config.grid, k):
+                        setattr(self.config.grid, k, v)
+                        updated.append(f"grid.{k}")
+            if "atr" in payload:
+                for k, v in payload["atr"].items():
+                    if hasattr(self.config.atr, k):
+                        setattr(self.config.atr, k, v)
+                        updated.append(f"atr.{k}")
+            if "risk" in payload:
+                for k, v in payload["risk"].items():
+                    if hasattr(self.config.risk, k):
+                        setattr(self.config.risk, k, v)
+                        updated.append(f"risk.{k}")
+            if "ml" in payload:
+                for k, v in payload["ml"].items():
+                    if hasattr(self.config.ml, k):
+                        setattr(self.config.ml, k, v)
+                        updated.append(f"ml.{k}")
+            if "telegram" in payload:
+                for k, v in payload["telegram"].items():
+                    if hasattr(self.config.telegram, k):
+                        setattr(self.config.telegram, k, v)
+                        updated.append(f"telegram.{k}")
+            if "websocket" in payload:
+                for k, v in payload["websocket"].items():
+                    if hasattr(self.config.websocket, k):
+                        setattr(self.config.websocket, k, v)
+                        updated.append(f"websocket.{k}")
+            if "cloud" in payload:
+                for k, v in payload["cloud"].items():
+                    if hasattr(self.config.cloud, k) and k != "database_url":
+                        setattr(self.config.cloud, k, v)
+                        updated.append(f"cloud.{k}")
+            if "pairs" in payload:
+                self.config.pairs = payload["pairs"]
+                updated.append("pairs")
+
+            logger.info("Config updated remotely: %s", updated)
+            return {"updated": updated}
+
+        self.cloud.on_command("stop", cmd_stop)
+        self.cloud.on_command("resume", cmd_resume)
+        self.cloud.on_command("pause", cmd_pause)
+        self.cloud.on_command("status", cmd_status)
+        self.cloud.on_command("performance", cmd_performance)
+        self.cloud.on_command("update_config", cmd_update_config)

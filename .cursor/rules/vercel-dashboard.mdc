@@ -1,0 +1,51 @@
+---
+description: Vercel Next.js dashboard conventions with Prisma + Neon
+globs: web/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Vercel Dashboard Conventions
+
+## Stack
+
+Next.js 15 App Router, TypeScript, Tailwind CSS, Prisma ORM, Recharts, Neon Postgres.
+
+## API Routes
+
+All in `web/src/app/api/`. Pattern:
+
+```typescript
+import { prisma } from "@/lib/prisma";
+const BOT_ID = process.env.BOT_ID || "richbot-pi";
+export const dynamic = "force-dynamic";
+
+export async function GET(request: NextRequest) {
+  const data = await prisma.someModel.findMany({ where: { botId: BOT_ID } });
+  return NextResponse.json(data);
+}
+```
+
+- Always filter by `BOT_ID`
+- Always set `dynamic = "force-dynamic"` (no caching for live data)
+- Validate POST body types before writing
+
+## Commands
+
+POST `/api/commands` creates a pending command. The Pi polls and processes it.
+Valid types: stop, resume, pause, status, performance, update_config.
+Adding a new command: add to `validTypes` array in `route.ts` + add handler in `bot/multi_pair.py` `_register_cloud_commands()`.
+
+## UI
+
+- Dark theme: bg-surface (#0b0d17), cards bg-surface-card (#111827)
+- Accent colors: green (#10b981), red (#ef4444), blue (#3b82f6), amber (#f59e0b)
+- Font: Inter for text, JetBrains Mono for numbers/code
+- Dashboard is single-page client component with 5s auto-refresh
+- PnL positive = green, negative = red
+
+## Prisma
+
+- Schema: `web/prisma/schema.prisma`
+- Column names are snake_case (@@map), model fields are camelCase
+- After schema changes: `npx prisma db push` (dev) or `npx prisma migrate deploy` (prod)
+- Raw SQL equivalent in `scripts/neon_schema.sql` — keep in sync with Prisma schema
