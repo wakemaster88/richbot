@@ -333,11 +333,16 @@ class CloudSync:
         except Exception:
             pass
 
-        try:
-            from urllib.request import urlopen
-            info["public_ip"] = urlopen("https://api.ipify.org", timeout=5).read().decode().strip()
-        except Exception:
-            pass
+        for ip_url in ("https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"):
+            try:
+                from urllib.request import urlopen, Request
+                req = Request(ip_url, headers={"User-Agent": "curl/8.0"})
+                ip = urlopen(req, timeout=5).read().decode().strip()
+                if ip and len(ip) <= 45:
+                    info["public_ip"] = ip
+                    break
+            except Exception:
+                continue
 
         return info
 
