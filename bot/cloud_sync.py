@@ -479,4 +479,5 @@ CREATE TABLE IF NOT EXISTS bot_events (
     detail JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_bot_events_ts ON bot_events (bot_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_events_cat ON bot_events (bot_id, category, timestamp DESC);
 """

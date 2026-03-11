@@ -93,10 +93,16 @@ class PairBot:
 
         if self.cloud and self.cloud.connected:
             asyncio.create_task(self.cloud.sync_trade(trade))
+            summary = self.tracker.get_summary(self.pair)
+            value = managed_order.fill_price * managed_order.amount
             asyncio.create_task(self.cloud.log_event(
                 "trade", f"{'Kauf' if managed_order.side == 'buy' else 'Verkauf'} {self.pair} @ {managed_order.fill_price:.2f}",
                 {"side": managed_order.side, "price": managed_order.fill_price,
-                 "amount": managed_order.amount, "pnl": managed_order.pnl},
+                 "amount": managed_order.amount, "value": round(value, 4),
+                 "fee": round(trade.fee, 6), "pnl": managed_order.pnl,
+                 "cum_pnl": round(summary["realized_pnl"], 4),
+                 "trade_nr": summary["trade_count"],
+                 "win": managed_order.pnl > 0},
             ))
 
     async def initialize(self):
@@ -709,6 +715,8 @@ class MultiPairBot:
             cycle += 1
             if cycle % 5 == 0:
                 await self._auto_adjust_grid()
+                if self.cloud.connected:
+                    await self._log_analytics_snapshot()
 
             if self.cloud.connected:
                 metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
@@ -716,6 +724,66 @@ class MultiPairBot:
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
             await asyncio.sleep(60)
+
+    async def _log_analytics_snapshot(self):
+        """Log comprehensive analytics every ~5 minutes for dashboard analysis."""
+        try:
+            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+            total_usdc = 0.0
+            balances: dict[str, float] = {}
+
+            for pair, bot in self.pair_bots.items():
+                base = pair.split("/")[0]
+                quote = pair.split("/")[1]
+                price = bot.current_price or 0
+
+                q = balance.get(quote, {})
+                balances[quote] = q.get("total", 0)
+                total_usdc = q.get("total", 0)
+
+                b = balance.get(base, {})
+                b_total = b.get("total", 0)
+                balances[base] = b_total
+                total_usdc += b_total * price
+
+            for pair, bot in self.pair_bots.items():
+                summary = self.tracker.get_summary(pair)
+                open_orders = bot.order_mgr.get_open_orders(pair)
+                total_levels = len(bot.grid.state.levels)
+                active = len(open_orders)
+                buys = sum(1 for o in open_orders if o.side == "buy")
+                sells = active - buys
+
+                await self.cloud.log_event(
+                    "snapshot",
+                    f"{pair} — {active}/{total_levels} Grid, PnL {summary['realized_pnl']:.4f}",
+                    {
+                        "pair": pair,
+                        "price": bot.current_price,
+                        "grid_active": active,
+                        "grid_total": total_levels,
+                        "grid_buys": buys,
+                        "grid_sells": sells,
+                        "grid_configured": bot.pair_grid_count,
+                        "order_amount": bot.pair_amount,
+                        "range": [bot.current_range.lower, bot.current_range.upper] if bot.current_range else None,
+                        "realized_pnl": summary["realized_pnl"],
+                        "unrealized_pnl": summary["unrealized_pnl"],
+                        "total_pnl": summary["total_pnl"],
+                        "trade_count": summary["trade_count"],
+                        "buy_count": summary.get("buy_count", 0),
+                        "sell_count": summary.get("sell_count", 0),
+                        "fees": summary["fees_paid"],
+                        "max_drawdown": summary["max_drawdown_pct"],
+                        "sharpe": summary["sharpe_ratio"],
+                        "equity": summary["current_equity"],
+                        "portfolio_total": total_usdc,
+                        "balances": balances,
+                        "issue": bot._grid_issue or None,
+                    },
+                )
+        except Exception as e:
+            logger.debug("Analytics snapshot failed: %s", e)
 
     async def _fetch_wallet(self) -> dict:
         """Fetch full wallet balances for dashboard display."""

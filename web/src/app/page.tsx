@@ -43,6 +43,19 @@ interface WalletEntry {
 }
 type WalletData = Record<string, WalletEntry> & { _total_usdc?: number };
 
+interface AnalyticsData {
+  summary: {
+    total_trades: number; wins: number; losses: number; win_rate: number;
+    total_pnl: number; total_fees: number; net_pnl: number;
+    avg_win: number; avg_loss: number; profit_factor: number;
+    max_win_streak: number; max_loss_streak: number;
+  } | null;
+  pair_stats: Record<string, { trades: number; pnl: number; wins: number; losses: number; volume: number }>;
+  hourly_pnl: { hour: string; pnl: number; count: number }[];
+  event_counts_24h: Record<string, number>;
+  snapshots: { timestamp: string; detail: Record<string, unknown> }[];
+}
+
 // -- Demo Data --
 
 function generateDemoEquity(): EquityPoint[] {
@@ -529,6 +542,112 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
   );
 }
 
+function AnalyticsPanel({ data }: { data: AnalyticsData }) {
+  const s = data.summary;
+  if (!s) return null;
+
+  const pairEntries = Object.entries(data.pair_stats);
+
+  return (
+    <div className="card p-4 sm:p-5 fade-in">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-4">Analyse</h3>
+
+      {/* KPIs */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Win-Rate</p>
+          <p className={`text-sm font-bold font-mono ${s.win_rate >= 50 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
+            {s.win_rate.toFixed(1)}%
+          </p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">{s.wins}W / {s.losses}L</p>
+        </div>
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Netto PnL</p>
+          <p className={`text-sm font-bold font-mono ${s.net_pnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
+            {s.net_pnl >= 0 ? "+" : ""}{fmt(s.net_pnl, 4)}
+          </p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">Gebuehren: {fmt(s.total_fees, 4)}</p>
+        </div>
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Profit-Faktor</p>
+          <p className={`text-sm font-bold font-mono ${s.profit_factor >= 1 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
+            {s.profit_factor.toFixed(2)}
+          </p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">Ø +{fmt(s.avg_win, 4)} / {fmt(s.avg_loss, 4)}</p>
+        </div>
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Streaks</p>
+          <p className="text-sm font-bold font-mono text-[var(--text-primary)]">
+            <span className="text-[var(--up)]">{s.max_win_streak}</span>
+            <span className="text-[var(--text-quaternary)]"> / </span>
+            <span className="text-[var(--down)]">{s.max_loss_streak}</span>
+          </p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">{s.total_trades} Trades</p>
+        </div>
+      </div>
+
+      {/* Per-Pair Stats */}
+      {pairEntries.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">Pro Pair</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+            {pairEntries.map(([pair, ps]) => {
+              const wr = ps.trades > 0 ? (ps.wins / ps.trades * 100) : 0;
+              return (
+                <div key={pair} className="flex items-center justify-between px-3 py-2 rounded-lg text-[10px] font-mono" style={{ background: "var(--bg-secondary)" }}>
+                  <span className="font-semibold text-[var(--text-primary)]">{pair}</span>
+                  <div className="flex items-center gap-3 text-[var(--text-tertiary)]">
+                    <span>{ps.trades} Trades</span>
+                    <span className={wr >= 50 ? "text-[var(--up)]" : "text-[var(--down)]"}>{wr.toFixed(0)}%</span>
+                    <span className={ps.pnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}>
+                      {ps.pnl >= 0 ? "+" : ""}{fmt(ps.pnl, 4)}
+                    </span>
+                    <span>Vol: {fmt(ps.volume, 2)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Hourly PnL Heatmap */}
+      {data.hourly_pnl.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">PnL pro Stunde</p>
+          <div className="flex flex-wrap gap-0.5">
+            {data.hourly_pnl.slice(-24).map((h) => {
+              const intensity = Math.min(Math.abs(h.pnl) * 500, 1);
+              const col = h.pnl >= 0 ? `rgba(16,185,129,${0.15 + intensity * 0.85})` : `rgba(239,68,68,${0.15 + intensity * 0.85})`;
+              const label = h.hour.slice(11, 13) + "h";
+              return (
+                <div key={h.hour} className="flex flex-col items-center gap-0.5" title={`${label}: ${h.pnl >= 0 ? "+" : ""}${h.pnl.toFixed(4)} (${h.count} Trades)`}>
+                  <div className="w-5 h-5 rounded-sm" style={{ background: col }} />
+                  <span className="text-[7px] text-[var(--text-quaternary)]">{label}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Event Activity 24h */}
+      {Object.keys(data.event_counts_24h).length > 0 && (
+        <div>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">Events (24h)</p>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(data.event_counts_24h).map(([cat, count]) => (
+              <span key={cat} className="px-2 py-1 rounded text-[9px] font-mono" style={{ background: "var(--bg-secondary)", color: "var(--text-tertiary)" }}>
+                {cat}: <strong className="text-[var(--text-primary)]">{count}</strong>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const EVT_ICONS: Record<string, string> = {
   trade: "T", grid: "G", error: "!", config: "C", system: "S",
 };
@@ -768,6 +887,7 @@ export default function Dashboard() {
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [commands, setCommands] = useState<CommandRecord[]>([]);
   const [events, setEvents] = useState<BotEvent[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
   const [latestCommit, setLatestCommit] = useState<string | null>(null);
@@ -777,12 +897,13 @@ export default function Dashboard() {
   const demoTrades = useMemo(() => generateDemoTrades(), []);
 
   const refresh = useCallback(async () => {
-    const [s, t, e, c, ev] = await Promise.all([
+    const [s, t, e, c, ev, an] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
       fetchJson<Trade[]>("/api/trades?limit=50"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
       fetchJson<CommandRecord[]>("/api/commands?limit=20"),
       fetchJson<BotEvent[]>("/api/events?limit=30"),
+      fetchJson<AnalyticsData>("/api/analytics"),
     ]);
 
     if (s?.dbConnected) {
@@ -791,6 +912,7 @@ export default function Dashboard() {
       setEquity(e || []);
       setCommands(c || []);
       setEvents(ev || []);
+      if (an?.summary) setAnalytics(an);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -937,6 +1059,9 @@ export default function Dashboard() {
           : <div className="card p-5 h-full flex items-center justify-center text-[10px] text-[var(--text-quaternary)]">PnL-Chart nach ersten Trades</div>
         }
       </div>
+
+      {/* Analytics */}
+      {!isDemo && analytics && <AnalyticsPanel data={analytics} />}
 
       {/* Trades + Activity + Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">

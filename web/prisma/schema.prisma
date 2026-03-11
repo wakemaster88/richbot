@@ -108,5 +108,6 @@ model BotEvent {
   detail    Json?
 
   @@index([botId, timestamp(sort: Desc)])
+  @@index([botId, category, timestamp(sort: Desc)])
   @@map("bot_events")
 }
