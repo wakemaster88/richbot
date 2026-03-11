@@ -306,11 +306,12 @@ class MultiPairBot:
             return True
         except Exception as e:
             err = str(e)
+            etype = type(e).__name__
             if "Api-Key" in err or "apiKey" in err or "-2008" in err or "-2014" in err or "credential" in err.lower():
                 logger.error("UNGUELTIGE API-KEYS: %s", e)
                 logger.error("Bitte gueltige Binance API-Keys im Dashboard unter Einstellungen > Secrets eintragen.")
             else:
-                logger.error("Exchange-Verbindung fehlgeschlagen: %s", e)
+                logger.error("Exchange-Verbindung fehlgeschlagen [%s]: %s", etype, e or "(kein Detail)")
             return False
 
     async def _wait_for_valid_credentials(self):
@@ -331,11 +332,19 @@ class MultiPairBot:
                 self.config.exchange.api_key = new_key
                 self.config.exchange.api_secret = new_secret
                 self.config.exchange.sandbox = False
+                try:
+                    await self.exchange.close()
+                except Exception:
+                    pass
                 self.exchange = Exchange(self.config.exchange)
                 if await self._test_exchange():
                     logger.info("Gueltige API-Keys erkannt — starte Trading...")
                     await self._start_trading()
                     return
+                try:
+                    await self.exchange.close()
+                except Exception:
+                    pass
             await self.cloud.send_heartbeat()
 
     async def _start_trading(self):
