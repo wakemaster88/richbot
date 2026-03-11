@@ -54,12 +54,20 @@ if [ -f /etc/dphys-swapfile ]; then
         echo "  Swap already >= ${SWAP_SIZE}MB"
     fi
 else
-    echo "  Creating ${SWAP_SIZE}MB swapfile..."
-    fallocate -l ${SWAP_SIZE}M /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-    echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+    if swapon --show | grep -q /swapfile; then
+        echo "  Swapfile already active"
+    elif [ -f /swapfile ]; then
+        echo "  Swapfile exists, activating..."
+        chmod 600 /swapfile
+        swapon /swapfile 2>/dev/null || echo "  Swapfile already in use"
+    else
+        echo "  Creating ${SWAP_SIZE}MB swapfile..."
+        fallocate -l ${SWAP_SIZE}M /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        grep -q "/swapfile" /etc/fstab || echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+    fi
 fi
 
 # --- SD Card / Storage Optimization ---
