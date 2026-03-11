@@ -163,7 +163,7 @@ function Stat({ label, wert, sub, farbe, klein }: {
   );
 }
 
-function PairKarte({ pair, m }: { pair: string; m: PairMetrics }) {
+function PairKarte({ pair, m, quote = "USDT" }: { pair: string; m: PairMetrics; quote?: string }) {
   const up = m.total_pnl >= 0;
   const rows = [
     { l: "Preis", v: fmt(m.price), c: "" },
@@ -189,7 +189,7 @@ function PairKarte({ pair, m }: { pair: string; m: PairMetrics }) {
         <div className="text-right">
           <p className="text-lg font-bold font-mono">{fmt(m.price)}</p>
           <p className={`text-xs font-mono font-semibold ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
-            {up ? "+" : ""}{fmt(m.total_pnl, 4)} USDT
+            {up ? "+" : ""}{fmt(m.total_pnl, 4)} {quote}
           </p>
         </div>
       </div>
@@ -204,15 +204,15 @@ function PairKarte({ pair, m }: { pair: string; m: PairMetrics }) {
       {(m.annualized_return_pct || m.fees_paid) && (
         <div className="flex items-center gap-4 mt-3 pt-3 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-tertiary)]">
           {m.annualized_return_pct !== undefined && <span>Jahresrendite: <strong className="text-[var(--text-secondary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
-          {m.fees_paid !== undefined && <span>Gebuhren: <strong className="text-[var(--text-secondary)]">{fmt(m.fees_paid)} USDT</strong></span>}
-          <span>Kapital: <strong className="text-[var(--text-secondary)]">{fmt(m.current_equity)} USDT</strong></span>
+          {m.fees_paid !== undefined && <span>Gebuhren: <strong className="text-[var(--text-secondary)]">{fmt(m.fees_paid)} {quote}</strong></span>}
+          <span>Kapital: <strong className="text-[var(--text-secondary)]">{fmt(m.current_equity)} {quote}</strong></span>
         </div>
       )}
     </div>
   );
 }
 
-function EquityChart({ data }: { data: EquityPoint[] }) {
+function EquityChart({ data, quote = "USDT" }: { data: EquityPoint[]; quote?: string }) {
   const cd = data.map((d) => ({
     t: new Date(d.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
     v: d.equity,
@@ -233,7 +233,7 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
       </div>
       <div className="flex items-baseline gap-2 mb-4">
         <span className="text-2xl font-bold font-mono">{fmt(cd[cd.length - 1]?.v || 0)}</span>
-        <span className="text-xs text-[var(--text-tertiary)]">USDT</span>
+        <span className="text-xs text-[var(--text-tertiary)]">{quote}</span>
         <span className={`text-xs font-mono font-semibold ml-1 ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
           {up ? "+" : ""}{fmt((cd[cd.length - 1]?.v || 0) - (cd[0]?.v || 0))} ({fmt(((cd[cd.length - 1]?.v || 1) / (cd[0]?.v || 1) - 1) * 100)}%)
         </span>
@@ -252,7 +252,7 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
           <Tooltip
             contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}
             labelStyle={{ color: "var(--text-tertiary)", marginBottom: 4 }}
-            formatter={(v: number) => [`${fmt(v)} USDT`, "Kapital"]}
+            formatter={(v: number) => [`${fmt(v)} ${quote}`, "Kapital"]}
             itemStyle={{ color: col, fontFamily: "JetBrains Mono" }}
           />
           <Area type="monotone" dataKey="v" stroke={col} strokeWidth={1.5} fill="url(#eqG)" dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
@@ -262,7 +262,7 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
   );
 }
 
-function PnlChart({ data }: { data: { zeit: string; pnl: number }[] }) {
+function PnlChart({ data, quote = "USDT" }: { data: { zeit: string; pnl: number }[]; quote?: string }) {
   return (
     <div className="card p-5">
       <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium mb-4">PnL pro Stunde</h3>
@@ -273,7 +273,7 @@ function PnlChart({ data }: { data: { zeit: string; pnl: number }[] }) {
           <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
           <Tooltip
             contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}
-            formatter={(v: number) => [`${v >= 0 ? "+" : ""}${fmt(v, 4)} USDT`, "PnL"]}
+            formatter={(v: number) => [`${v >= 0 ? "+" : ""}${fmt(v, 4)} ${quote}`, "PnL"]}
           />
           <Bar dataKey="pnl" radius={[3, 3, 0, 0]} maxBarSize={16}>
             {data.map((d, i) => (
@@ -467,6 +467,7 @@ export default function Dashboard() {
 
   const status = botStatus || DEMO_STATUS;
   const pairs = Object.entries((status.pairStatuses || {}) as Record<string, PairMetrics>);
+  const quoteCcy = status.pairs?.[0]?.split("/")?.[1] || "USDT";
   const totalPnl = pairs.reduce((s, [, m]) => s + (m.total_pnl || 0), 0);
   const totalTrades = pairs.reduce((s, [, m]) => s + (m.trade_count || 0), 0);
   const totalEquity = pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
@@ -527,8 +528,8 @@ export default function Dashboard() {
 
       {/* Top Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
-        <Stat label="Gesamt-PnL" wert={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 4)}`} sub="USDT" farbe={totalPnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} klein />
-        <Stat label="Kapital" wert={fmt(totalEquity)} sub="USDT" klein />
+        <Stat label="Gesamt-PnL" wert={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 4)}`} sub={quoteCcy} farbe={totalPnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} klein />
+        <Stat label="Kapital" wert={fmt(totalEquity)} sub={quoteCcy} klein />
         <Stat label="Trades" wert={totalTrades.toLocaleString("de-DE")} sub="gesamt" klein />
         <Stat label="Drawdown" wert={`${fmt(maxDd)}%`} farbe={maxDd > 5 ? "text-[var(--down)]" : "text-[var(--warn)]"} klein />
         <Stat label="Sharpe" wert={fmt(avgSharpe)} farbe={avgSharpe > 1.5 ? "text-[var(--up)]" : ""} klein />
@@ -537,13 +538,13 @@ export default function Dashboard() {
 
       {/* Pair Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
-        {pairs.map(([p, m]) => <PairKarte key={p} pair={p} m={m} />)}
+        {pairs.map(([p, m]) => <PairKarte key={p} pair={p} m={m} quote={quoteCcy} />)}
       </div>
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
-        <EquityChart data={equity} />
-        {pnlData.length > 0 && <PnlChart data={pnlData} />}
+        <EquityChart data={equity} quote={quoteCcy} />
+        {pnlData.length > 0 && <PnlChart data={pnlData} quote={quoteCcy} />}
         {pnlData.length === 0 && <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">PnL-Chart erscheint nach ersten Trades</div>}
       </div>
 
