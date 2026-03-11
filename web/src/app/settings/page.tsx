@@ -355,9 +355,7 @@ function formatUptime(seconds: number): string {
 const SECRET_FIELDS = [
   { key: "BINANCE_API_KEY", label: "Binance API-Key", hint: "Spot-Trading muss aktiviert sein", placeholder: "z.B. aB3d...xY9z" },
   { key: "BINANCE_SECRET", label: "Binance Secret", hint: "Geheimer Schlüssel zum API-Key", placeholder: "z.B. kL7m...pQ2r" },
-  { key: "TELEGRAM_TOKEN", label: "Telegram Bot-Token", hint: "Für Benachrichtigungen und AI-Chat", placeholder: "z.B. 123456:ABC-DEF..." },
-  { key: "TELEGRAM_CHAT_ID", label: "Telegram Chat-ID", hint: "Deine Chat-ID für Alerts und Befehle", placeholder: "z.B. 987654321" },
-  { key: "XAI_API_KEY", label: "xAI API-Key (Grok)", hint: "Für KI-gestützte Telegram-Antworten und Analysen", placeholder: "xai-..." },
+  { key: "XAI_API_KEY", label: "xAI API-Key (Grok)", hint: "Fuer KI-gestuetzte Telegram-Antworten und Analysen", placeholder: "xai-..." },
 ];
 
 function SecretsSektion() {
@@ -427,8 +425,8 @@ function SecretsSektion() {
             </svg>
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-[var(--text-primary)]">API-Schlüssel & Secrets</h3>
-            <p className="text-[11px] text-[var(--text-tertiary)]">Werden in der Datenbank gespeichert — der Pi lädt sie beim Start</p>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Binance & KI-API</h3>
+            <p className="text-[11px] text-[var(--text-tertiary)]">Werden in der Datenbank gespeichert — der Pi laedt sie beim Start</p>
           </div>
         </div>
         {hasChanges && (
@@ -479,6 +477,244 @@ function SecretsSektion() {
           und setzt sie als Umgebungsvariablen. So brauchst du auf dem Pi nur <span className="font-mono text-[var(--text-secondary)]">NEON_DATABASE_URL</span> in der .env Datei.
         </p>
       </div>
+    </div>
+  );
+}
+
+/* ---- Telegram Setup ---- */
+
+function TelegramSektion({ config, update }: { config: BotConfigData; update: (path: string, value: unknown) => void }) {
+  const [token, setToken] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [chats, setChats] = useState<{ id: number; name: string; type: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [finding, setFinding] = useState(false);
+  const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [meta, setMeta] = useState<Record<string, { set: boolean }>>({});
+
+  useEffect(() => {
+    fetch("/api/secrets", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setMeta(d.secrets || {}))
+      .catch(() => {});
+  }, []);
+
+  const tokenSet = meta.TELEGRAM_TOKEN?.set;
+  const chatIdSet = meta.TELEGRAM_CHAT_ID?.set;
+
+  const saveToken = async () => {
+    if (!token.trim()) return;
+    setSaving(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/secrets", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secrets: { TELEGRAM_TOKEN: token.trim() } }),
+      });
+      if (res.ok) {
+        setMsg({ type: "ok", text: "Bot-Token gespeichert" });
+        setMeta((p) => ({ ...p, TELEGRAM_TOKEN: { set: true } }));
+        setToken("");
+      } else setMsg({ type: "err", text: "Speichern fehlgeschlagen" });
+    } catch { setMsg({ type: "err", text: "Netzwerkfehler" }); }
+    setSaving(false);
+  };
+
+  const findChatId = async () => {
+    setFinding(true);
+    setMsg(null);
+    setChats([]);
+    try {
+      const res = await fetch("/api/telegram-test", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "get_chat_id" }),
+      });
+      const data = await res.json();
+      if (data.chats?.length) {
+        setChats(data.chats);
+      } else if (data.error) {
+        setMsg({ type: "err", text: data.error });
+      } else {
+        setMsg({ type: "err", text: "Keine Chats gefunden. Schreib dem Bot zuerst eine Nachricht auf Telegram." });
+      }
+    } catch { setMsg({ type: "err", text: "Netzwerkfehler" }); }
+    setFinding(false);
+  };
+
+  const selectChat = async (id: number) => {
+    setSaving(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/secrets", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secrets: { TELEGRAM_CHAT_ID: String(id) } }),
+      });
+      if (res.ok) {
+        setMsg({ type: "ok", text: `Chat-ID ${id} gespeichert` });
+        setMeta((p) => ({ ...p, TELEGRAM_CHAT_ID: { set: true } }));
+        setChats([]);
+        setChatId("");
+      }
+    } catch { setMsg({ type: "err", text: "Speichern fehlgeschlagen" }); }
+    setSaving(false);
+  };
+
+  const saveChatIdManual = async () => {
+    if (!chatId.trim()) return;
+    await selectChat(Number(chatId.trim()));
+  };
+
+  const testMessage = async () => {
+    setTesting(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/telegram-test", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "test_message" }),
+      });
+      const data = await res.json();
+      if (data.ok) setMsg({ type: "ok", text: "Test-Nachricht gesendet — pruefe Telegram!" });
+      else setMsg({ type: "err", text: data.error || "Senden fehlgeschlagen" });
+    } catch { setMsg({ type: "err", text: "Netzwerkfehler" }); }
+    setTesting(false);
+  };
+
+  return (
+    <div className="card card-hover p-5 sm:p-6 transition-all">
+      <div className="flex items-center gap-3 mb-5">
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "color-mix(in srgb, #0088cc 12%, transparent)", border: "1px solid color-mix(in srgb, #0088cc 20%, transparent)" }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="#0088cc"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/></svg>
+        </div>
+        <div>
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Telegram-Bot</h3>
+          <p className="text-[11px] text-[var(--text-tertiary)]">Benachrichtigungen, Berichte und KI-Chat</p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {tokenSet && chatIdSet && <span className="text-[9px] font-bold px-2 py-1 rounded-lg bg-[var(--up-bg)] text-[var(--up)]">VERBUNDEN</span>}
+          {tokenSet && !chatIdSet && <span className="text-[9px] font-bold px-2 py-1 rounded-lg bg-[var(--warn-bg)] text-[var(--warn)]">CHAT-ID FEHLT</span>}
+          {!tokenSet && <span className="text-[9px] font-bold px-2 py-1 rounded-lg bg-[var(--bg-secondary)] text-[var(--text-quaternary)]">NICHT EINGERICHTET</span>}
+        </div>
+      </div>
+
+      {msg && (
+        <div className="mb-4 px-3 py-2 rounded-lg text-[11px] font-medium" style={{
+          background: msg.type === "ok" ? "var(--up-bg)" : "var(--down-bg)",
+          color: msg.type === "ok" ? "var(--up)" : "var(--down)",
+        }}>{msg.text}</div>
+      )}
+
+      {/* Step 1: Bot Token */}
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center" style={{ background: tokenSet ? "var(--up-bg)" : "var(--accent-bg)", color: tokenSet ? "var(--up)" : "var(--accent)" }}>
+            {tokenSet ? "✓" : "1"}
+          </span>
+          <span className="text-xs font-semibold text-[var(--text-primary)]">Bot-Token von BotFather</span>
+        </div>
+        {!tokenSet ? (
+          <div className="ml-7 space-y-2">
+            <p className="text-[10px] text-[var(--text-tertiary)] leading-relaxed">
+              Oeffne <a href="https://t.me/BotFather" target="_blank" className="text-[var(--accent)] underline">@BotFather</a> auf Telegram, sende <span className="font-mono text-[var(--text-secondary)]">/newbot</span>, vergib einen Namen und kopiere den Token hierher.
+            </p>
+            <div className="flex gap-2">
+              <input type="text" value={token} onChange={(e) => setToken(e.target.value)} placeholder="123456789:ABCdef..."
+                className="flex-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-primary)] placeholder:text-[var(--text-quaternary)] focus:border-[var(--accent)] focus:outline-none transition-all" />
+              <button onClick={saveToken} disabled={saving || !token.trim()}
+                className="px-4 py-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
+                style={{ background: "var(--accent-bg)", color: "var(--accent)" }}>
+                {saving ? "..." : "Speichern"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="ml-7 text-[10px] text-[var(--up)]">Bot-Token ist gesetzt</p>
+        )}
+      </div>
+
+      {/* Step 2: Chat ID */}
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center" style={{ background: chatIdSet ? "var(--up-bg)" : tokenSet ? "var(--accent-bg)" : "var(--bg-secondary)", color: chatIdSet ? "var(--up)" : tokenSet ? "var(--accent)" : "var(--text-quaternary)" }}>
+            {chatIdSet ? "✓" : "2"}
+          </span>
+          <span className="text-xs font-semibold text-[var(--text-primary)]">Chat-ID verknuepfen</span>
+        </div>
+        {tokenSet && !chatIdSet ? (
+          <div className="ml-7 space-y-3">
+            <p className="text-[10px] text-[var(--text-tertiary)] leading-relaxed">
+              Schreibe deinem Bot eine beliebige Nachricht auf Telegram, dann klicke:
+            </p>
+            <button onClick={findChatId} disabled={finding}
+              className="px-4 py-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
+              style={{ background: "var(--accent-bg)", color: "var(--accent)" }}>
+              {finding ? "Suche Chats..." : "Chat-ID automatisch finden"}
+            </button>
+            {chats.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] text-[var(--text-tertiary)]">Gefundene Chats — waehle deinen:</p>
+                {chats.map((c) => (
+                  <button key={c.id} onClick={() => selectChat(c.id)} disabled={saving}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-left text-[11px] transition-all hover:opacity-80"
+                    style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+                    <span className="font-medium text-[var(--text-primary)]">{c.name}</span>
+                    <span className="font-mono text-[var(--text-tertiary)]">{c.id} · {c.type}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-[10px] text-[var(--text-quaternary)]">
+              <span className="flex-1 h-px bg-[var(--border-subtle)]" />
+              <span>oder manuell</span>
+              <span className="flex-1 h-px bg-[var(--border-subtle)]" />
+            </div>
+            <div className="flex gap-2">
+              <input type="text" value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="z.B. 987654321"
+                className="flex-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-primary)] placeholder:text-[var(--text-quaternary)] focus:border-[var(--accent)] focus:outline-none transition-all" />
+              <button onClick={saveChatIdManual} disabled={saving || !chatId.trim()}
+                className="px-4 py-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
+                style={{ background: "var(--accent-bg)", color: "var(--accent)" }}>
+                {saving ? "..." : "Speichern"}
+              </button>
+            </div>
+          </div>
+        ) : chatIdSet ? (
+          <p className="ml-7 text-[10px] text-[var(--up)]">Chat-ID ist gesetzt</p>
+        ) : (
+          <p className="ml-7 text-[10px] text-[var(--text-quaternary)]">Zuerst Bot-Token eintragen</p>
+        )}
+      </div>
+
+      {/* Step 3: Test */}
+      {tokenSet && chatIdSet && (
+        <div className="mb-5">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center" style={{ background: "var(--up-bg)", color: "var(--up)" }}>3</span>
+            <span className="text-xs font-semibold text-[var(--text-primary)]">Verbindung testen</span>
+          </div>
+          <div className="ml-7">
+            <button onClick={testMessage} disabled={testing}
+              className="px-4 py-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
+              style={{ background: "var(--up-bg)", color: "var(--up)", border: "1px solid color-mix(in srgb, var(--up) 20%, transparent)" }}>
+              {testing ? "Sende..." : "Test-Nachricht senden"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Notification Settings */}
+      {tokenSet && chatIdSet && (
+        <div className="border-t border-[var(--border-subtle)] pt-4 space-y-2">
+          <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-medium mb-2">Benachrichtigungen</p>
+          <Schalter label="Telegram aktiviert" value={config.telegram?.enabled} onChange={(v) => update("telegram.enabled", v)} />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
+            <Schalter label="Alert bei Order-Fill" value={config.telegram?.alert_on_fill} onChange={(v) => update("telegram.alert_on_fill", v)} />
+            <Schalter label="Alert bei Range-Verschiebung" value={config.telegram?.alert_on_range_shift} onChange={(v) => update("telegram.alert_on_range_shift", v)} />
+            <Schalter label="Alert bei Drawdown" value={config.telegram?.alert_on_drawdown} onChange={(v) => update("telegram.alert_on_drawdown", v)} />
+            <Schalter label="Taeglicher Bericht" value={config.telegram?.daily_report} onChange={(v) => update("telegram.daily_report", v)} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -708,9 +944,6 @@ function RaspberryPiSektion() {
         )}
       </div>
 
-      {/* Secrets */}
-      <SecretsSektion />
-
       {/* Installation Guide */}
       <div className="card card-hover p-5 sm:p-6 transition-all">
         <button
@@ -911,6 +1144,10 @@ export default function SettingsPage() {
         {/* Raspberry Pi */}
         <RaspberryPiSektion />
 
+        {/* Secrets & Telegram */}
+        <SecretsSektion />
+        <TelegramSektion config={config} update={update} />
+
         <div className="flex items-center gap-3 pt-2">
           <div className="h-px flex-1 bg-[var(--border)]" />
           <span className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.15em] font-medium">Bot-Konfiguration</span>
@@ -976,17 +1213,6 @@ export default function SettingsPage() {
             hint="z.B. 1h, 4h"
             placeholder="1h"
           />
-        </Sektion>
-
-        {/* Telegram */}
-        <Sektion titel="Telegram-Benachrichtigungen" beschreibung="Alerts und Berichte per Telegram">
-          <Schalter label="Telegram aktiviert" value={config.telegram?.enabled} onChange={(v) => update("telegram.enabled", v)} />
-          <div className="border-t border-[var(--border-subtle)] pt-3 space-y-1">
-            <Schalter label="Alert bei Order-Fill" value={config.telegram?.alert_on_fill} onChange={(v) => update("telegram.alert_on_fill", v)} />
-            <Schalter label="Alert bei Range-Verschiebung" value={config.telegram?.alert_on_range_shift} onChange={(v) => update("telegram.alert_on_range_shift", v)} />
-            <Schalter label="Alert bei Drawdown" value={config.telegram?.alert_on_drawdown} onChange={(v) => update("telegram.alert_on_drawdown", v)} />
-            <Schalter label="Taglicher Bericht" value={config.telegram?.daily_report} onChange={(v) => update("telegram.daily_report", v)} />
-          </div>
         </Sektion>
 
         {/* WebSocket */}
