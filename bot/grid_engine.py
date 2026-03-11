@@ -78,7 +78,7 @@ class GridState:
 class GridEngine:
     """Computes and manages grid levels with trailing/infinity support."""
 
-    MIN_SPACING_VS_FEE = 1.5  # spacing must be >= 1.5x round-trip fee
+    MIN_SPACING_VS_FEE = 1.2  # spacing must be >= 1.2x round-trip fee
     FEE_RATE = 0.001
 
     def __init__(self, grid_count: int = 20, spacing_percent: float = 0.5,
@@ -104,54 +104,61 @@ class GridEngine:
         raw = [((i + 1) / count) ** 0.6 for i in range(count)]
         return raw
 
-    def calculate_grid(self, range_result: RangeResult, current_price: float,
-                       dynamic_amount: float | None = None) -> list[GridLevel]:
-        """Calculate grid levels within the given range.
-        Uses sqrt-weighted spacing: denser near current price, sparser at boundaries."""
-        self.state.range_result = range_result
-        self.state.last_price = current_price
-        amount = dynamic_amount or self.amount_per_order
-
+    def _build_levels(self, range_result: RangeResult, current_price: float,
+                       amount: float, use_linear: bool = False) -> list[GridLevel]:
+        """Build grid levels with either sqrt-weighted or linear spacing."""
         min_fee_spacing = current_price * self.FEE_RATE * 2 * self.MIN_SPACING_VS_FEE
 
         total_levels = self.grid_count
         buy_count = total_levels // 2
         sell_count = total_levels - buy_count
 
-        levels = []
+        levels: list[GridLevel] = []
+
         buy_span = current_price - range_result.lower
-        buy_weights = self._weighted_positions(buy_count)
+        if use_linear and buy_count > 0:
+            buy_weights = [(i + 1) / buy_count for i in range(buy_count)]
+        else:
+            buy_weights = self._weighted_positions(buy_count)
         for i, w in enumerate(buy_weights):
             price = current_price - buy_span * w
             price = max(price, range_result.lower)
             if i > 0 and levels:
-                prev = levels[-1].price
-                if abs(price - prev) < min_fee_spacing:
+                if abs(price - levels[-1].price) < min_fee_spacing:
                     continue
-            levels.append(GridLevel(
-                price=round(price, 2),
-                side="buy",
-                amount=amount,
-                index=i,
-            ))
+            levels.append(GridLevel(price=round(price, 2), side="buy", amount=amount, index=i))
 
         sell_span = range_result.upper - current_price
-        sell_weights = self._weighted_positions(sell_count)
+        if use_linear and sell_count > 0:
+            sell_weights = [(i + 1) / sell_count for i in range(sell_count)]
+        else:
+            sell_weights = self._weighted_positions(sell_count)
         for i, w in enumerate(sell_weights):
             price = current_price + sell_span * w
             price = min(price, range_result.upper)
             if i > 0 and levels:
-                prev = levels[-1].price
-                if abs(price - prev) < min_fee_spacing:
+                if abs(price - levels[-1].price) < min_fee_spacing:
                     continue
-            levels.append(GridLevel(
-                price=round(price, 2),
-                side="sell",
-                amount=amount,
-                index=i,
-            ))
+            levels.append(GridLevel(price=round(price, 2), side="sell", amount=amount, index=i))
 
         levels.sort(key=lambda l: l.price)
+        return levels
+
+    def calculate_grid(self, range_result: RangeResult, current_price: float,
+                       dynamic_amount: float | None = None) -> list[GridLevel]:
+        """Calculate grid levels within the given range.
+        Tries sqrt-weighted spacing first; falls back to linear if too many levels are filtered."""
+        self.state.range_result = range_result
+        self.state.last_price = current_price
+        amount = dynamic_amount or self.amount_per_order
+
+        levels = self._build_levels(range_result, current_price, amount, use_linear=False)
+
+        if len(levels) < self.grid_count:
+            linear = self._build_levels(range_result, current_price, amount, use_linear=True)
+            if len(linear) > len(levels):
+                levels = linear
+
         self.state.levels = levels
         self.state.invalidate()
 

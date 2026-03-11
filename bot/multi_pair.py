@@ -314,6 +314,13 @@ class PairBot:
                     self.pair, risk_status["drawdown_pct"], usdt,
                 )
                 await self.order_mgr.cancel_all(self.pair)
+                if self.cloud and self.cloud.connected:
+                    asyncio.create_task(self.cloud.log_event(
+                        "error", f"Trading pausiert: Drawdown {risk_status['drawdown_pct']:.1f}% (Auto-Resume in 5 Min)",
+                        {"pair": self.pair, "drawdown": risk_status["drawdown_pct"],
+                         "equity": usdt, "peak": risk_status["peak"]},
+                        level="warn",
+                    ))
         except Exception as e:
             logger.error("Equity update failed for %s: %s", self.pair, e)
 

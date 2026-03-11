@@ -23,6 +23,8 @@ class TelegramNotifier:
         self.ai = AIChat()
         self.scheduler = Scheduler()
         self._bot_runner = None
+        self._fail_count = 0
+        self._muted = False
 
     async def _get_bot(self):
         if self._bot is None and self.config.enabled and self.config.bot_token:
@@ -39,6 +41,8 @@ class TelegramNotifier:
     async def send_message(self, text: str, parse_mode: str = "HTML"):
         if not self.config.enabled or not self.config.chat_id:
             return
+        if self._muted:
+            return
         bot = await self._get_bot()
         if bot is None:
             return
@@ -50,8 +54,14 @@ class TelegramNotifier:
                 text=text,
                 parse_mode=parse_mode,
             )
+            self._fail_count = 0
         except Exception as e:
-            logger.error("Telegram send failed: %s", e)
+            self._fail_count += 1
+            if self._fail_count <= 3:
+                logger.error("Telegram send failed: %s", e)
+            if self._fail_count == 3:
+                logger.warning("Telegram nach 3 Fehlern stummgeschaltet (Chat-ID pruefen)")
+                self._muted = True
 
     # ---- Alerts ----
 

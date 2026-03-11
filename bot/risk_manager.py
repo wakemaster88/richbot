@@ -63,6 +63,8 @@ class RiskState:
 class RiskManager:
     """Manages position sizing, drawdown protection, and trailing stops."""
 
+    DRAWDOWN_COOLDOWN_SEC = 300  # 5 min cooldown, then auto-resume
+
     def __init__(self, config: RiskConfig):
         self.config = config
         self.state = RiskState()
@@ -177,8 +179,13 @@ class RiskManager:
         return triggered
 
     def can_trade(self) -> tuple[bool, str]:
-        """Check if trading is allowed."""
+        """Check if trading is allowed. Auto-resumes after cooldown."""
         if self.state.is_paused:
+            elapsed = time.time() - self.state.pause_timestamp
+            if elapsed >= self.DRAWDOWN_COOLDOWN_SEC:
+                logger.info("Drawdown-Pause abgelaufen (%.0fs) — Trading wird fortgesetzt", elapsed)
+                self.resume()
+                return True, ""
             return False, self.state.pause_reason
         return True, ""
 
