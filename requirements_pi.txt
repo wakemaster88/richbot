@@ -10,8 +10,8 @@ pandas>=2.0.0
 numpy>=1.24.0
 pandas-ta>=0.3.14b
 
-# ML inference (TFLite only — no full TensorFlow on Pi)
-tflite-runtime>=2.14.0
+# ML inference (optional — install manually if supported on your Python version)
+# tflite-runtime>=2.14.0  # Not available for Python 3.13+; bot runs without ML
 joblib>=1.3.0
 
 # Database
