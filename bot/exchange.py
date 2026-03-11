@@ -1,85 +1,62 @@
-"""Exchange abstraction layer using ccxt."""
+"""Exchange abstraction — direct HTTP for Pi, ccxt fallback for desktop."""
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
+import hmac
+import json as _json
 import logging
+import time as _time
 from typing import Any
-
-import ccxt
-import ccxt.async_support as ccxt_async
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from bot.config import ExchangeConfig
 
 logger = logging.getLogger(__name__)
 
+_BINANCE = "https://api.binance.com"
+
 
 class Exchange:
-    """Unified exchange interface with both sync and async support."""
+    """Unified exchange interface — prefers lightweight direct HTTP."""
 
     def __init__(self, config: ExchangeConfig):
         self.config = config
-        self._sync: ccxt.Exchange | None = None
-        self._async: ccxt_async.Exchange | None = None
+        self._markets: dict[str, dict] = {}
 
-    def _get_exchange_class(self, async_mode: bool = False):
-        module = ccxt_async if async_mode else ccxt
-        exchange_cls = getattr(module, self.config.name, None)
-        if exchange_cls is None:
-            raise ValueError(f"Exchange '{self.config.name}' not supported by ccxt")
-        return exchange_cls
-
-    def _build_params(self) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "enableRateLimit": self.config.rate_limit,
-            "options": {
-                "defaultType": "spot",
-                "fetchMarkets": ["spot"],
-                "fetchCurrencies": False,
-                "warnOnFetchOpenOrdersWithoutSymbol": False,
-            },
-        }
-        if self.config.api_key:
-            params["apiKey"] = self.config.api_key
-        if self.config.api_secret:
-            params["secret"] = self.config.api_secret
-        return params
+    # ── market data ──────────────────────────────────────────────
 
     async def preload_markets(self, symbols: list[str]):
         """Load only specific markets via direct HTTP to minimize memory."""
-        import json as _json
-        from urllib.request import urlopen
-
-        client = self.async_client
         binance_syms = [s.replace("/", "") for s in symbols]
-
         if len(binance_syms) == 1:
             qs = f"symbol={binance_syms[0]}"
         else:
             qs = f'symbols={_json.dumps(binance_syms)}'
 
-        url = f"https://api.binance.com/api/v3/exchangeInfo?{qs}"
+        url = f"{_BINANCE}/api/v3/exchangeInfo?{qs}"
         logger.info("Loading markets for %s", symbols)
 
         resp = urlopen(url, timeout=15)
         exchange_info = _json.loads(resp.read().decode())
 
-        parsed = []
         for sym_data in exchange_info.get("symbols", []):
             try:
-                parsed.append(self._parse_binance_market(sym_data))
+                m = self._parse_binance_market(sym_data)
+                self._markets[m["symbol"]] = m
             except Exception as e:
                 logger.warning("Failed to parse market %s: %s", sym_data.get("symbol"), e)
 
-        if parsed:
-            client.set_markets(parsed)
-            logger.info("Loaded %d markets: %s", len(parsed), [m["symbol"] for m in parsed])
+        if self._markets:
+            logger.info("Loaded %d markets: %s", len(self._markets), list(self._markets.keys()))
         else:
             raise RuntimeError("No markets parsed — check symbol names")
 
     @staticmethod
     def _parse_binance_market(data: dict) -> dict:
-        """Parse Binance exchangeInfo symbol into ccxt market format."""
+        """Parse Binance exchangeInfo symbol into market dict."""
         base = data["baseAsset"]
         quote = data["quoteAsset"]
         symbol = f"{base}/{quote}"
@@ -94,156 +71,151 @@ class Exchange:
             "symbol": symbol,
             "base": base,
             "quote": quote,
-            "baseId": base,
-            "quoteId": quote,
-            "active": data.get("status") == "TRADING",
-            "type": "spot",
-            "spot": True,
-            "margin": False,
-            "swap": False,
-            "future": False,
-            "option": False,
-            "contract": False,
             "precision": {
                 "amount": float(lot_f.get("stepSize", "0.00001")),
                 "price": float(price_f.get("tickSize", "0.01")),
             },
             "limits": {
-                "amount": {
-                    "min": float(lot_f.get("minQty", 0)),
-                    "max": float(lot_f.get("maxQty", 0)),
-                },
-                "price": {
-                    "min": float(price_f.get("minPrice", 0)),
-                    "max": float(price_f.get("maxPrice", 0)),
-                },
-                "cost": {
-                    "min": float(notional.get("minNotional", notional.get("notional", 0))),
-                },
+                "amount": {"min": float(lot_f.get("minQty", 0)), "max": float(lot_f.get("maxQty", 0))},
+                "price": {"min": float(price_f.get("minPrice", 0)), "max": float(price_f.get("maxPrice", 0))},
+                "cost": {"min": float(notional.get("minNotional", notional.get("notional", 0)))},
             },
-            "info": data,
         }
 
-    def fetch_account_balances(self) -> dict[str, dict[str, float]]:
-        """Fetch balances directly via HTTP (no ccxt overhead)."""
-        import hmac, hashlib, time as _time, json as _json
-        from urllib.request import Request, urlopen
+    # ── precision helpers ────────────────────────────────────────
 
-        ts = int(_time.time() * 1000)
-        query = f"timestamp={ts}"
-        sig = hmac.new(
-            self.config.api_secret.encode(), query.encode(), hashlib.sha256
-        ).hexdigest()
-        url = f"https://api.binance.com/api/v3/account?{query}&signature={sig}"
-        req = Request(url, headers={"X-MBX-APIKEY": self.config.api_key})
-        resp = urlopen(req, timeout=10)
-        data = _json.loads(resp.read().decode())
-
-        balances: dict[str, dict[str, float]] = {}
-        for b in data.get("balances", []):
-            free = float(b["free"])
-            locked = float(b["locked"])
-            if free > 0 or locked > 0:
-                balances[b["asset"]] = {
-                    "free": free,
-                    "used": locked,
-                    "total": free + locked,
-                }
-        return balances
-
-    @property
-    def sync(self) -> ccxt.Exchange:
-        if self._sync is None:
-            cls = self._get_exchange_class(async_mode=False)
-            self._sync = cls(self._build_params())
-            if self.config.sandbox:
-                self._sync.set_sandbox_mode(True)
-            logger.info("Sync exchange initialized: %s (sandbox=%s)", self.config.name, self.config.sandbox)
-        return self._sync
-
-    @property
-    def async_client(self) -> ccxt_async.Exchange:
-        if self._async is None:
-            cls = self._get_exchange_class(async_mode=True)
-            self._async = cls(self._build_params())
-            if self.config.sandbox:
-                self._async.set_sandbox_mode(True)
-            logger.info("Async exchange initialized: %s", self.config.name)
-        return self._async
-
-    async def close(self):
-        if self._async:
-            await self._async.close()
-            self._async = None
-
-    def fetch_ticker(self, symbol: str) -> dict[str, Any]:
-        return self.sync.fetch_ticker(symbol)
-
-    async def async_fetch_ticker(self, symbol: str) -> dict[str, Any]:
-        return await self.async_client.fetch_ticker(symbol)
-
-    def fetch_ohlcv(
-        self, symbol: str, timeframe: str = "1h", limit: int = 500, since: int | None = None
-    ) -> list[list]:
-        return self.sync.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)
-
-    async def async_fetch_ohlcv(
-        self, symbol: str, timeframe: str = "1h", limit: int = 500, since: int | None = None
-    ) -> list[list]:
-        return await self.async_client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)
-
-    def fetch_balance(self) -> dict[str, Any]:
-        return self.sync.fetch_balance()
-
-    async def async_fetch_balance(self) -> dict[str, Any]:
-        return await self.async_client.fetch_balance()
-
-    def create_limit_buy(self, symbol: str, amount: float, price: float, params: dict | None = None) -> dict:
-        return self.sync.create_limit_buy_order(symbol, amount, price, params=params or {})
-
-    def create_limit_sell(self, symbol: str, amount: float, price: float, params: dict | None = None) -> dict:
-        return self.sync.create_limit_sell_order(symbol, amount, price, params=params or {})
-
-    async def async_create_limit_buy(self, symbol: str, amount: float, price: float, params: dict | None = None) -> dict:
-        return await self.async_client.create_limit_buy_order(symbol, amount, price, params=params or {})
-
-    async def async_create_limit_sell(self, symbol: str, amount: float, price: float, params: dict | None = None) -> dict:
-        return await self.async_client.create_limit_sell_order(symbol, amount, price, params=params or {})
-
-    def cancel_order(self, order_id: str, symbol: str) -> dict:
-        return self.sync.cancel_order(order_id, symbol)
-
-    async def async_cancel_order(self, order_id: str, symbol: str) -> dict:
-        return await self.async_client.cancel_order(order_id, symbol)
-
-    def cancel_all_orders(self, symbol: str) -> list:
-        try:
-            return self.sync.cancel_all_orders(symbol)
-        except Exception:
-            orders = self.sync.fetch_open_orders(symbol)
-            results = []
-            for order in orders:
-                try:
-                    results.append(self.sync.cancel_order(order["id"], symbol))
-                except Exception as e:
-                    logger.warning("Failed to cancel order %s: %s", order["id"], e)
-            return results
-
-    def fetch_open_orders(self, symbol: str) -> list[dict]:
-        return self.sync.fetch_open_orders(symbol)
-
-    async def async_fetch_open_orders(self, symbol: str) -> list[dict]:
-        return await self.async_client.fetch_open_orders(symbol)
-
-    def fetch_my_trades(self, symbol: str, since: int | None = None, limit: int = 100) -> list[dict]:
-        return self.sync.fetch_my_trades(symbol, since=since, limit=limit)
-
-    def get_market_info(self, symbol: str) -> dict:
-        self.sync.load_markets()
-        return self.sync.markets.get(symbol, {})
-
-    def price_to_precision(self, symbol: str, price: float) -> str:
-        return self.sync.price_to_precision(symbol, price)
+    @staticmethod
+    def _step_format(value: float, step: float) -> str:
+        """Truncate value to step-size precision and return as string."""
+        if step <= 0 or step >= 1:
+            return str(int(value))
+        decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[1]))
+        truncated = int(value / step) * step
+        return f"{truncated:.{decimals}f}"
 
     def amount_to_precision(self, symbol: str, amount: float) -> str:
-        return self.sync.amount_to_precision(symbol, amount)
+        m = self._markets.get(symbol)
+        step = m["precision"]["amount"] if m else 0.00001
+        return self._step_format(amount, step)
+
+    def price_to_precision(self, symbol: str, price: float) -> str:
+        m = self._markets.get(symbol)
+        step = m["precision"]["price"] if m else 0.01
+        return self._step_format(price, step)
+
+    # ── signed request helper ────────────────────────────────────
+
+    def _signed_request(self, method: str, path: str, extra: dict | None = None) -> dict:
+        params = extra or {}
+        params["timestamp"] = int(_time.time() * 1000)
+        query = urlencode(params)
+        sig = hmac.new(self.config.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        url = f"{_BINANCE}{path}?{query}&signature={sig}"
+        req = Request(url, method=method, headers={"X-MBX-APIKEY": self.config.api_key})
+        try:
+            resp = urlopen(req, timeout=10)
+            return _json.loads(resp.read().decode())
+        except HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()
+                err = _json.loads(body)
+                msg = err.get("msg", body)
+            except Exception:
+                msg = body or str(e)
+            raise Exception(f"binance {msg}") from None
+
+    # ── public data (no auth) ────────────────────────────────────
+
+    def fetch_ticker_http(self, symbol: str) -> dict:
+        binance_sym = symbol.replace("/", "")
+        url = f"{_BINANCE}/api/v3/ticker/24hr?symbol={binance_sym}"
+        resp = urlopen(url, timeout=10)
+        d = _json.loads(resp.read().decode())
+        return {
+            "symbol": symbol,
+            "last": float(d["lastPrice"]),
+            "bid": float(d["bidPrice"]),
+            "ask": float(d["askPrice"]),
+            "high": float(d["highPrice"]),
+            "low": float(d["lowPrice"]),
+            "volume": float(d["volume"]),
+        }
+
+    def fetch_ohlcv_http(self, symbol: str, interval: str = "1h", limit: int = 200) -> list[list]:
+        binance_sym = symbol.replace("/", "")
+        url = f"{_BINANCE}/api/v3/klines?symbol={binance_sym}&interval={interval}&limit={limit}"
+        resp = urlopen(url, timeout=15)
+        raw = _json.loads(resp.read().decode())
+        return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in raw]
+
+    # ── account / balance (auth) ─────────────────────────────────
+
+    def fetch_account_balances(self) -> dict[str, dict[str, float]]:
+        data = self._signed_request("GET", "/api/v3/account")
+        balances: dict[str, dict[str, float]] = {}
+        for b in data.get("balances", []):
+            free, locked = float(b["free"]), float(b["locked"])
+            if free > 0 or locked > 0:
+                balances[b["asset"]] = {"free": free, "used": locked, "total": free + locked}
+        return balances
+
+    # ── orders (auth) ────────────────────────────────────────────
+
+    def create_order_http(self, symbol: str, side: str, amount: float, price: float) -> dict:
+        binance_sym = symbol.replace("/", "")
+        qty_str = self.amount_to_precision(symbol, amount)
+        px_str = self.price_to_precision(symbol, price)
+        data = self._signed_request("POST", "/api/v3/order", {
+            "symbol": binance_sym,
+            "side": side.upper(),
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": qty_str,
+            "price": px_str,
+        })
+        return {"id": str(data["orderId"]), "symbol": symbol, "side": side.lower(),
+                "price": float(data["price"]), "amount": float(data["origQty"]), "status": data["status"].lower()}
+
+    def cancel_order_http(self, order_id: str, symbol: str) -> dict:
+        binance_sym = symbol.replace("/", "")
+        return self._signed_request("DELETE", "/api/v3/order", {"symbol": binance_sym, "orderId": order_id})
+
+    def fetch_open_orders_http(self, symbol: str) -> list[dict]:
+        binance_sym = symbol.replace("/", "")
+        data = self._signed_request("GET", "/api/v3/openOrders", {"symbol": binance_sym})
+        return [{"id": str(o["orderId"]), "symbol": symbol, "side": o["side"].lower(),
+                 "price": float(o["price"]), "amount": float(o["origQty"]), "status": o["status"].lower()} for o in data]
+
+    # ── async wrappers (run sync HTTP in thread) ─────────────────
+
+    async def async_fetch_ticker(self, symbol: str) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.fetch_ticker_http, symbol)
+
+    async def async_fetch_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200, since: int | None = None) -> list[list]:
+        import asyncio
+        return await asyncio.to_thread(self.fetch_ohlcv_http, symbol, timeframe, limit)
+
+    async def async_fetch_balance(self) -> dict[str, dict[str, float]]:
+        import asyncio
+        return await asyncio.to_thread(self.fetch_account_balances)
+
+    async def async_create_limit_buy(self, symbol: str, amount: float, price: float, params: dict | None = None) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.create_order_http, symbol, "buy", amount, price)
+
+    async def async_create_limit_sell(self, symbol: str, amount: float, price: float, params: dict | None = None) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.create_order_http, symbol, "sell", amount, price)
+
+    async def async_cancel_order(self, order_id: str, symbol: str) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.cancel_order_http, order_id, symbol)
+
+    async def async_fetch_open_orders(self, symbol: str) -> list[dict]:
+        import asyncio
+        return await asyncio.to_thread(self.fetch_open_orders_http, symbol)
+
+    async def close(self):
+        pass

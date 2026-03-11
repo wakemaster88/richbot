@@ -1,9 +1,9 @@
 # RichBot Pi 5 — Lightweight runtime dependencies
 # Training/optimization must be done on desktop, then deploy to Pi
 
-# Core trading
-ccxt>=4.0.0
-aiohttp>=3.9.0
+# Core trading — exchange.py uses direct HTTP (urllib), no ccxt needed on Pi
+# ccxt>=4.0.0      # only needed on desktop or if WebSocket mode is enabled
+# aiohttp>=3.9.0   # only needed on desktop
 
 # Data
 pandas>=2.0.0

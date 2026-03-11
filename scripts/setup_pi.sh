@@ -110,6 +110,8 @@ cat > /etc/systemd/system/richbot.service << SVCEOF
 Description=RichBot Grid Trading Bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -120,8 +122,6 @@ ExecStartPre=/bin/sleep 10
 ExecStart=$VENV_DIR/bin/python main.py --config config_pi.json
 Restart=always
 RestartSec=30
-StartLimitBurst=5
-StartLimitIntervalSec=600
 
 MemoryMax=2G
 MemoryHigh=1536M

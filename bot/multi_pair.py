@@ -22,7 +22,11 @@ from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
 from bot.risk_manager import RiskManager
 from bot.telegram_bot import TelegramNotifier
-from bot.ws_client import WebSocketClient
+
+try:
+    from bot.ws_client import WebSocketClient
+except ImportError:
+    WebSocketClient = None  # type: ignore[misc,assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +106,7 @@ class PairBot:
         )
 
         vol = self.risk.calculate_volatility(df["close"].values)
-        try:
-            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
-        except Exception:
-            balance = await self.exchange.async_fetch_balance()
+        balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
 
         quote_bal = balance.get(self.quote, {})
         base = self.pair.split("/")[0]
@@ -177,7 +178,7 @@ class PairBot:
                 except Exception:
                     vol = 0.02
 
-                balance = await self.exchange.async_fetch_balance()
+                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
                 usdt = balance.get(self.quote, {}).get("free", 10000)
                 dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
 
@@ -230,10 +231,7 @@ class PairBot:
     async def update_equity(self):
         """Update equity tracking."""
         try:
-            try:
-                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
-            except Exception:
-                balance = await self.exchange.async_fetch_balance()
+            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
 
             quote_bal = balance.get(self.quote, {})
             base = self.pair.split("/")[0]
@@ -521,7 +519,7 @@ class MultiPairBot:
                             bot.current_range = new_range
 
                             vol = self.risk.calculate_volatility(df["close"].values)
-                            balance = await self.exchange.async_fetch_balance()
+                            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
                             usdt = balance.get(bot.quote, {}).get("free", 10000)
                             dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
 
