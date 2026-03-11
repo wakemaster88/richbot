@@ -88,10 +88,10 @@ class PairBot:
         logger.info("Initializing pair bot for %s", self.pair)
 
         fetch_limit = self.config.pi.ohlcv_fetch_limit if self.config.is_pi else 200
-        ohlcv = self.exchange.fetch_ohlcv(self.pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
+        ohlcv = await self.exchange.async_fetch_ohlcv(self.pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        ticker = self.exchange.fetch_ticker(self.pair)
+        ticker = await self.exchange.async_fetch_ticker(self.pair)
         self.current_price = ticker["last"]
 
         self.current_range = compute_dynamic_range(
@@ -101,7 +101,7 @@ class PairBot:
         )
 
         vol = self.risk.calculate_volatility(df["close"].values)
-        balance = self.exchange.fetch_balance()
+        balance = await self.exchange.async_fetch_balance()
         usdt_balance = balance.get("USDT", {}).get("free", 10000)
         dynamic_amount = self.risk.calculate_position_size(usdt_balance, self.current_price, vol)
 
@@ -383,7 +383,9 @@ class MultiPairBot:
             try:
                 await bot.initialize()
             except Exception as e:
-                logger.error("Failed to initialize %s: %s", pair, e)
+                logger.error("Failed to initialize %s [%s]: %s", pair, type(e).__name__, e or "(kein Detail)")
+                import traceback
+                logger.debug("".join(traceback.format_exception(e)))
 
         await self.telegram.send_startup_message(self.config.pairs)
 
