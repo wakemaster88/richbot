@@ -84,11 +84,25 @@ interface BotConfigData {
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
+function deepMerge<T extends Record<string, unknown>>(defaults: T, override: Partial<T>): T {
+  const result = { ...defaults };
+  for (const key of Object.keys(override) as (keyof T)[]) {
+    const ov = override[key];
+    const dv = defaults[key];
+    if (ov && typeof ov === "object" && !Array.isArray(ov) && dv && typeof dv === "object" && !Array.isArray(dv)) {
+      result[key] = deepMerge(dv as Record<string, unknown>, ov as Record<string, unknown>) as T[keyof T];
+    } else if (ov !== undefined) {
+      result[key] = ov as T[keyof T];
+    }
+  }
+  return result;
+}
+
 const DEFAULTS: BotConfigData = {
-  exchange: { name: "binance", sandbox: true },
-  pairs: ["BTC/USDT", "ETH/USDT"],
+  exchange: { name: "binance", sandbox: false },
+  pairs: ["BTC/USDC"],
   grid: {
-    grid_count: 20,
+    grid_count: 4,
     spacing_percent: 0.5,
     amount_per_order: 0.0001,
     range_multiplier: 1.0,
@@ -802,8 +816,8 @@ export default function SettingsPage() {
       const res = await fetch("/api/config", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
-        if (data.config) {
-          setConfig(data.config);
+        if (data.config && typeof data.config === "object") {
+          setConfig(deepMerge(structuredClone(DEFAULTS), data.config));
           setUpdatedAt(data.updatedAt);
         } else {
           setConfig(structuredClone(DEFAULTS));
@@ -820,8 +834,7 @@ export default function SettingsPage() {
   useEffect(() => { load(); }, [load]);
 
   const update = (path: string, value: unknown) => {
-    if (!config) return;
-    setConfig(set(config, path, value));
+    setConfig((prev) => prev ? set(prev, path, value) : prev);
     setSaveStatus("idle");
   };
 
