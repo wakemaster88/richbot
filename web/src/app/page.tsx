@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
-  AreaChart, Area, BarChart, Bar, ComposedChart, Line, XAxis, YAxis, Tooltip,
+  AreaChart, Area, BarChart, Bar, ComposedChart, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, Cell, ReferenceLine,
 } from "recharts";
 
@@ -56,15 +56,13 @@ function generateDemoPnl(): { zeit: string; pnl: number }[] {
 }
 
 function generateDemoTrades(): Trade[] {
-  const pairs = ["BTC/USDC"];
   const now = Date.now();
   return Array.from({ length: 20 }, (_, i) => {
     const side = Math.random() > 0.5 ? "buy" : "sell";
-    const pair = pairs[Math.floor(Math.random() * pairs.length)];
     const price = 87000 + (Math.random() - 0.5) * 2000;
     return {
       id: `demo-${i}`, timestamp: new Date(now - i * 180000 * Math.random() * 5).toISOString(),
-      pair, side, price: parseFloat(price.toFixed(2)),
+      pair: "BTC/USDC", side, price: parseFloat(price.toFixed(2)),
       amount: parseFloat((Math.random() * 0.0005 + 0.0001).toFixed(8)),
       pnl: parseFloat(((Math.random() - 0.4) * 0.5).toFixed(4)),
     };
@@ -127,13 +125,19 @@ function fmt(n: number, d = 2): string {
   return n.toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
-function fmtBtc(n: number): string {
-  return n.toLocaleString("de-DE", { minimumFractionDigits: 8, maximumFractionDigits: 8 });
-}
-
 function fmtSats(n: number): string {
   const sats = Math.round(n * 1e8);
   return sats.toLocaleString("de-DE") + " sat";
+}
+
+// -- Skeleton --
+
+function Skeleton({ h = 200, className = "" }: { h?: number; className?: string }) {
+  return (
+    <div className={`rounded-2xl overflow-hidden ${className}`} style={{ height: h, background: "var(--bg-card)", border: "1px solid var(--border)" }}>
+      <div className="w-full h-full animate-pulse" style={{ background: "linear-gradient(110deg, var(--bg-card) 30%, var(--bg-elevated) 50%, var(--bg-card) 70%)", backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite" }} />
+    </div>
+  );
 }
 
 // -- Components --
@@ -153,90 +157,71 @@ function StatusBadge({ status, hb }: { status: string; hb: string }) {
   );
 }
 
-function Stat({ label, wert, sub, farbe, klein }: {
-  label: string; wert: string; sub?: string; farbe?: string; klein?: boolean;
-}) {
+function MiniStat({ label, wert, farbe }: { label: string; wert: string; farbe?: string }) {
   return (
-    <div className="card card-hover p-4 transition-all">
-      <p className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium mb-1.5">{label}</p>
-      <p className={`${klein ? "text-lg" : "text-[22px]"} font-bold font-mono tracking-tight leading-none ${farbe || ""}`} style={farbe ? {} : { color: "var(--text-primary)" }}>
-        {wert}
-      </p>
-      {sub && <p className="text-[10px] text-[var(--text-tertiary)] mt-1.5">{sub}</p>}
+    <div className="card-inner px-3 py-2.5">
+      <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-medium">{label}</p>
+      <p className={`text-[15px] font-bold font-mono tracking-tight mt-0.5 ${farbe || "text-[var(--text-primary)]"}`}>{wert}</p>
     </div>
   );
 }
 
 function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; quote?: string }) {
   const up = m.total_pnl >= 0;
-  const rows = [
-    { l: `Preis (${quote})`, v: fmt(m.price), c: "" },
-    { l: "Grid", v: `${m.active_orders}/${m.grid_levels}`, c: "" },
-    { l: "Trades", v: `${m.trade_count}`, c: "" },
-    { l: `PnL (${quote})`, v: `${up ? "+" : ""}${fmt(m.total_pnl, 4)}`, c: up ? "text-[var(--up)]" : "text-[var(--down)]" },
-    { l: "Drawdown", v: `${fmt(m.max_drawdown_pct)}%`, c: "text-[var(--warn)]" },
-    { l: "Sharpe", v: fmt(m.sharpe_ratio), c: m.sharpe_ratio > 1.5 ? "text-[var(--up)]" : "" },
-  ];
 
   return (
-    <div className="card card-hover p-5 transition-all fade-in">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs" style={{ background: up ? "var(--up-bg)" : "var(--down-bg)", color: up ? "var(--up)" : "var(--down)" }}>
+    <div className="card p-4 sm:p-5 fade-in">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[10px]" style={{ background: up ? "var(--up-bg)" : "var(--down-bg)", color: up ? "var(--up)" : "var(--down)" }}>
             {pair.split("/")[0]}
           </div>
           <div>
-            <h3 className="font-semibold text-[15px] leading-tight">{pair}</h3>
-            <p className="text-[10px] text-[var(--text-tertiary)] font-mono">{m.range} · {m.range_source}</p>
+            <h3 className="font-semibold text-sm leading-tight">{pair}</h3>
+            <p className="text-[9px] text-[var(--text-quaternary)] font-mono">{m.range}</p>
           </div>
         </div>
         <div className="text-right">
-          <p className="text-lg font-bold font-mono">{fmt(m.price)} <span className="text-xs text-[var(--text-tertiary)]">{quote}</span></p>
-          <p className={`text-xs font-mono font-semibold ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
+          <p className="text-lg font-bold font-mono tracking-tight">{fmt(m.price)}</p>
+          <p className={`text-[11px] font-mono font-semibold ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
             {up ? "+" : ""}{fmt(m.total_pnl, 4)} {quote}
           </p>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-3">
-        {rows.map((r) => (
-          <div key={r.l} className="card-inner px-3 py-2">
-            <p className="text-[9px] text-[var(--text-tertiary)] uppercase tracking-wider">{r.l}</p>
-            <p className={`text-sm font-mono font-semibold mt-0.5 ${r.c}`}>{r.v}</p>
-          </div>
-        ))}
+
+      {/* Stats Grid */}
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <MiniStat label="Grid" wert={`${m.active_orders}/${m.grid_levels}`} />
+        <MiniStat label="Trades" wert={`${m.trade_count}`} />
+        <MiniStat label="Drawdown" wert={`${fmt(m.max_drawdown_pct)}%`} farbe="text-[var(--warn)]" />
       </div>
-      {(m.annualized_return_pct || m.fees_paid) && (
-        <div className="flex items-center gap-4 mt-3 pt-3 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-tertiary)]">
-          {m.annualized_return_pct !== undefined && <span>Jahresrendite: <strong className="text-[var(--text-secondary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
-          {m.fees_paid !== undefined && <span>Gebuhren: <strong className="text-[var(--text-secondary)]">{fmt(m.fees_paid)} {quote}</strong></span>}
-          <span>Kapital: <strong className="text-[var(--text-secondary)]">{fmt(m.current_equity)} {quote}</strong></span>
-        </div>
-      )}
+
+      {/* Open Orders */}
       {m.open_orders && m.open_orders.length > 0 && (
-        <div className="mt-3 pt-3 border-t border-[var(--border-subtle)]">
-          <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-medium mb-2">Offene Orders</p>
-          <div className="space-y-1">
+        <div className="pt-3 border-t border-[var(--border-subtle)]">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-1.5">Offene Orders</p>
+          <div className="grid grid-cols-2 gap-1">
             {m.open_orders.map((o) => {
               const isBuy = o.side === "buy";
               const dist = m.price > 0 ? ((o.price - m.price) / m.price * 100) : 0;
               return (
-                <div key={o.id} className="flex items-center justify-between text-[11px] font-mono px-2.5 py-1.5 rounded-lg" style={{ background: isBuy ? "var(--up-bg)" : "var(--down-bg)" }}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ color: isBuy ? "var(--up)" : "var(--down)" }}>
-                      {isBuy ? "KAUF" : "VERK."}
-                    </span>
-                    <span className="text-[var(--text-secondary)]">{fmt(o.price)} {quote}</span>
-                  </div>
-                  <div className="flex items-center gap-3 text-[var(--text-tertiary)]">
-                    <span>{fmtSats(o.amount)}</span>
-                    <span className="text-[10px]" style={{ color: dist < 0 ? "var(--up)" : "var(--down)" }}>
-                      {dist >= 0 ? "+" : ""}{dist.toFixed(1)}%
-                    </span>
-                  </div>
+                <div key={o.id} className="flex items-center justify-between text-[10px] font-mono px-2 py-1 rounded-md" style={{ background: isBuy ? "var(--up-bg)" : "var(--down-bg)" }}>
+                  <span style={{ color: isBuy ? "var(--up)" : "var(--down)" }}>{isBuy ? "K" : "V"} {fmt(o.price, 0)}</span>
+                  <span className="text-[var(--text-quaternary)]">{dist >= 0 ? "+" : ""}{dist.toFixed(1)}%</span>
                 </div>
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      {(m.annualized_return_pct || m.fees_paid) && (
+        <div className="flex items-center gap-3 mt-3 pt-3 border-t border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)]">
+          {m.annualized_return_pct !== undefined && <span>Rendite: <strong className="text-[var(--text-tertiary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
+          {m.fees_paid !== undefined && <span>Gebuehren: <strong className="text-[var(--text-tertiary)]">{fmt(m.fees_paid)}</strong></span>}
+          <span>Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity)}</strong></span>
         </div>
       )}
     </div>
@@ -254,23 +239,20 @@ function EquityChart({ data, quote = "USDC" }: { data: EquityPoint[]; quote?: st
   const mx = Math.max(...cd.map((d) => d.v));
 
   return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium">Kapitalverlauf</h3>
-        <div className="flex items-center gap-3 text-[11px] text-[var(--text-tertiary)]">
-          <span>Min: <strong className="text-[var(--text-secondary)] font-mono">{fmt(mn)}</strong></span>
-          <span>Max: <strong className="text-[var(--text-secondary)] font-mono">{fmt(mx)}</strong></span>
-        </div>
+    <div className="card p-4 sm:p-5 h-full">
+      <div className="flex items-center justify-between mb-0.5">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Kapitalverlauf</h3>
+        <span className="text-[9px] text-[var(--text-quaternary)] font-mono">{fmt(mn)} – {fmt(mx)}</span>
       </div>
-      <div className="flex items-baseline gap-2 mb-4">
-        <span className="text-2xl font-bold font-mono">{fmt(cd[cd.length - 1]?.v || 0)}</span>
-        <span className="text-xs text-[var(--text-tertiary)]">{quote}</span>
-        <span className={`text-xs font-mono font-semibold ml-1 ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
+      <div className="flex items-baseline gap-2 mb-3">
+        <span className="text-xl font-bold font-mono">{fmt(cd[cd.length - 1]?.v || 0)}</span>
+        <span className="text-[10px] text-[var(--text-tertiary)]">{quote}</span>
+        <span className={`text-[11px] font-mono font-semibold ml-1 ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
           {up ? "+" : ""}{fmt((cd[cd.length - 1]?.v || 0) - (cd[0]?.v || 0))} ({fmt(((cd[cd.length - 1]?.v || 1) / (cd[0]?.v || 1) - 1) * 100)}%)
         </span>
       </div>
-      <ResponsiveContainer width="100%" height={200}>
-        <AreaChart data={cd} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+      <ResponsiveContainer width="100%" height={180}>
+        <AreaChart data={cd} margin={{ top: 0, right: 0, left: -15, bottom: 0 }}>
           <defs>
             <linearGradient id="eqG" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={col} stopOpacity={0.15} />
@@ -278,13 +260,13 @@ function EquityChart({ data, quote = "USDC" }: { data: EquityPoint[]; quote?: st
             </linearGradient>
           </defs>
           <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey="t" tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} domain={[mn * 0.9995, mx * 1.0005]} width={55} />
+          <XAxis dataKey="t" tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} domain={[mn * 0.9995, mx * 1.0005]} width={50} />
           <Tooltip
-            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}
-            labelStyle={{ color: "var(--text-tertiary)", marginBottom: 4 }}
+            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "6px 10px", fontSize: 11 }}
+            labelStyle={{ color: "var(--text-tertiary)", marginBottom: 2, fontSize: 10 }}
             formatter={(v: number) => [`${fmt(v)} ${quote}`, "Kapital"]}
-            itemStyle={{ color: col, fontFamily: "JetBrains Mono" }}
+            itemStyle={{ color: col, fontFamily: "JetBrains Mono, monospace" }}
           />
           <Area type="monotone" dataKey="v" stroke={col} strokeWidth={1.5} fill="url(#eqG)" dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
         </AreaChart>
@@ -295,20 +277,20 @@ function EquityChart({ data, quote = "USDC" }: { data: EquityPoint[]; quote?: st
 
 function PnlChart({ data, quote = "USDC" }: { data: { zeit: string; pnl: number }[]; quote?: string }) {
   return (
-    <div className="card p-5">
-      <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium mb-4">PnL pro Stunde</h3>
-      <ResponsiveContainer width="100%" height={200}>
-        <BarChart data={data} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+    <div className="card p-4 sm:p-5 h-full">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-3">PnL pro Stunde</h3>
+      <ResponsiveContainer width="100%" height={180}>
+        <BarChart data={data} margin={{ top: 0, right: 0, left: -15, bottom: 0 }}>
           <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} interval={2} />
-          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
+          <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} interval={3} />
+          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} width={35} />
           <Tooltip
-            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}
+            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "6px 10px", fontSize: 11 }}
             formatter={(v: number) => [`${v >= 0 ? "+" : ""}${fmt(v, 4)} ${quote}`, "PnL"]}
           />
-          <Bar dataKey="pnl" radius={[3, 3, 0, 0]} maxBarSize={16}>
+          <Bar dataKey="pnl" radius={[3, 3, 0, 0]} maxBarSize={14}>
             {data.map((d, i) => (
-              <Cell key={i} fill={d.pnl >= 0 ? "var(--up)" : "var(--down)"} fillOpacity={0.7} />
+              <Cell key={i} fill={d.pnl >= 0 ? "var(--up)" : "var(--down)"} fillOpacity={0.65} />
             ))}
           </Bar>
         </BarChart>
@@ -322,28 +304,77 @@ interface Kline { t: number; o: number; h: number; l: number; c: number; v: numb
 function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: OpenOrder[]; quote?: string }) {
   const [klines, setKlines] = useState<Kline[]>([]);
   const [interval, setInterval_] = useState("5m");
+  const [error, setError] = useState(false);
+  const retryRef = useRef(0);
 
   useEffect(() => {
     let active = true;
     const load = async () => {
       try {
         const sym = pair.replace("/", "");
-        const res = await fetch(`/api/klines?symbol=${sym}&interval=${interval}&limit=120`);
-        if (res.ok && active) setKlines(await res.json());
-      } catch { /* ignore */ }
+        const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${interval}&limit=120`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("API error");
+        const raw = await res.json();
+        if (!active) return;
+        const parsed: Kline[] = raw.map((k: unknown[]) => ({
+          t: Number(k[0]), o: parseFloat(k[1] as string), h: parseFloat(k[2] as string),
+          l: parseFloat(k[3] as string), c: parseFloat(k[4] as string), v: parseFloat(k[5] as string),
+        }));
+        setKlines(parsed);
+        setError(false);
+        retryRef.current = 0;
+      } catch {
+        if (!active) return;
+        retryRef.current++;
+        if (retryRef.current <= 3) {
+          setTimeout(load, 2000 * retryRef.current);
+          return;
+        }
+        try {
+          const sym = pair.replace("/", "");
+          const res = await fetch(`/api/klines?symbol=${sym}&interval=${interval}&limit=120`);
+          if (res.ok && active) {
+            setKlines(await res.json());
+            setError(false);
+            return;
+          }
+        } catch { /* ignore */ }
+        if (active) setError(true);
+      }
     };
     load();
     const iv = window.setInterval(load, 30000);
     return () => { active = false; clearInterval(iv); };
   }, [pair, interval]);
 
-  if (!klines.length) return <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">Lade Preisdaten...</div>;
+  const intervals = ["1m", "5m", "15m", "1h", "4h", "1d"];
+
+  if (error) {
+    return (
+      <div className="card p-5 h-full flex flex-col items-center justify-center gap-2 text-center">
+        <p className="text-xs text-[var(--text-tertiary)]">Preisdaten nicht verfuegbar</p>
+        <button onClick={() => { setError(false); retryRef.current = 0; }} className="text-[10px] text-[var(--accent)] underline">Erneut versuchen</button>
+      </div>
+    );
+  }
+
+  if (!klines.length) {
+    return (
+      <div className="card p-5 h-full flex flex-col">
+        <div className="flex items-center justify-between mb-3">
+          <div className="h-3 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
+          <div className="flex gap-1">{intervals.map((iv) => <div key={iv} className="h-4 w-6 rounded bg-[var(--bg-elevated)] animate-pulse" />)}</div>
+        </div>
+        <div className="h-5 w-32 rounded bg-[var(--bg-elevated)] animate-pulse mb-3" />
+        <div className="flex-1 rounded-lg bg-[var(--bg-elevated)] animate-pulse" style={{ minHeight: 180 }} />
+      </div>
+    );
+  }
 
   const data = klines.map((k) => ({
     zeit: new Date(k.t).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
-    preis: k.c,
-    hoch: k.h,
-    tief: k.l,
+    preis: k.c, hoch: k.h, tief: k.l,
   }));
 
   const allPrices = klines.flatMap((k) => [k.h, k.l]);
@@ -358,16 +389,14 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
   const col = up ? "var(--up)" : "var(--down)";
   const chg = first > 0 ? ((last - first) / first * 100) : 0;
 
-  const intervals = ["1m", "5m", "15m", "1h", "4h", "1d"];
-
   return (
-    <div className="card p-5">
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium">{pair} Live-Preis</h3>
-        <div className="flex items-center gap-1">
+    <div className="card p-4 sm:p-5 h-full">
+      <div className="flex items-center justify-between mb-0.5">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">{pair}</h3>
+        <div className="flex items-center gap-0.5">
           {intervals.map((iv) => (
             <button key={iv} onClick={() => setInterval_(iv)}
-              className="px-2 py-0.5 rounded text-[10px] font-mono transition-all"
+              className="px-1.5 py-0.5 rounded text-[9px] font-mono transition-all"
               style={{
                 background: interval === iv ? "var(--accent-bg)" : "transparent",
                 color: interval === iv ? "var(--accent)" : "var(--text-quaternary)",
@@ -377,15 +406,15 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
           ))}
         </div>
       </div>
-      <div className="flex items-baseline gap-2 mb-4">
-        <span className="text-2xl font-bold font-mono">{fmt(last)}</span>
-        <span className="text-xs text-[var(--text-tertiary)]">{quote}</span>
-        <span className={`text-xs font-mono font-semibold ml-1`} style={{ color: col }}>
+      <div className="flex items-baseline gap-2 mb-3">
+        <span className="text-xl font-bold font-mono">{fmt(last)}</span>
+        <span className="text-[10px] text-[var(--text-tertiary)]">{quote}</span>
+        <span className="text-[11px] font-mono font-semibold ml-1" style={{ color: col }}>
           {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
         </span>
       </div>
-      <ResponsiveContainer width="100%" height={250}>
-        <ComposedChart data={data} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+      <ResponsiveContainer width="100%" height={220}>
+        <ComposedChart data={data} margin={{ top: 0, right: 0, left: -15, bottom: 0 }}>
           <defs>
             <linearGradient id="prG" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={col} stopOpacity={0.12} />
@@ -393,15 +422,15 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
             </linearGradient>
           </defs>
           <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} domain={[mn - pad, mx + pad]} width={60} tickFormatter={(v) => fmt(v, 0)} />
+          <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} domain={[mn - pad, mx + pad]} width={55} tickFormatter={(v) => fmt(v, 0)} />
           <Tooltip
-            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}
+            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "6px 10px", fontSize: 11 }}
             formatter={(v: number, name: string) => [fmt(v) + " " + quote, name === "preis" ? "Preis" : name === "hoch" ? "Hoch" : "Tief"]}
           />
           {(orders || []).map((o) => (
-            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "var(--up)" : "var(--down)"} strokeDasharray="4 3" strokeOpacity={0.6}
-              label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "var(--up)" : "var(--down)", fontSize: 9, position: "right" }} />
+            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "var(--up)" : "var(--down)"} strokeDasharray="4 3" strokeOpacity={0.5}
+              label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "var(--up)" : "var(--down)", fontSize: 8, position: "right" }} />
           ))}
           <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill="url(#prG)" dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
         </ComposedChart>
@@ -411,38 +440,43 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
 }
 
 function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: string }) {
-  if (!trades.length) return <div className="card p-8 text-center text-sm text-[var(--text-tertiary)]">Noch keine Trades</div>;
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? trades : trades.slice(0, 10);
+
+  if (!trades.length) {
+    return (
+      <div className="card p-6 text-center">
+        <p className="text-[11px] text-[var(--text-quaternary)]">Noch keine Trades</p>
+      </div>
+    );
+  }
 
   return (
     <div className="card overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-[var(--border)]">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium">Letzte Trades</h3>
-          <span className="text-[10px] text-[var(--text-quaternary)]">{trades.length} angezeigt</span>
-        </div>
+      <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Letzte Trades</h3>
+        <span className="text-[9px] text-[var(--text-quaternary)] font-mono">{trades.length}</span>
       </div>
 
       {/* Mobile */}
       <div className="sm:hidden divide-y divide-[var(--border-subtle)]">
-        {trades.map((t) => (
-          <div key={t.id} className="px-4 py-3">
-            <div className="flex items-center justify-between mb-1">
-              <div className="flex items-center gap-2">
-                <span className={`w-1.5 h-1.5 rounded-full`} style={{ background: t.side === "buy" ? "var(--up)" : "var(--down)" }} />
-                <span className="text-sm font-medium">{t.pair}</span>
-                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{
+        {shown.map((t) => (
+          <div key={t.id} className="px-4 py-2.5">
+            <div className="flex items-center justify-between mb-0.5">
+              <div className="flex items-center gap-1.5">
+                <span className="w-1 h-1 rounded-full" style={{ background: t.side === "buy" ? "var(--up)" : "var(--down)" }} />
+                <span className="text-[10px] font-semibold px-1 py-0.5 rounded" style={{
                   background: t.side === "buy" ? "var(--up-bg)" : "var(--down-bg)",
                   color: t.side === "buy" ? "var(--up)" : "var(--down)"
-                }}>
-                  {t.side === "buy" ? "KAUF" : "VERK."}
-                </span>
+                }}>{t.side === "buy" ? "KAUF" : "VERK."}</span>
+                <span className="text-xs font-mono">{fmt(t.price, 0)}</span>
               </div>
-              <span className="text-sm font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
-                {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)} {quote}
+              <span className="text-xs font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
+                {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)}
               </span>
             </div>
-            <div className="flex justify-between text-[10px] text-[var(--text-tertiary)]">
-              <span className="font-mono">{fmt(t.price)} · {fmtSats(t.amount)} <span className="text-[var(--text-quaternary)]">({fmt(t.amount * t.price)} {quote})</span></span>
+            <div className="flex justify-between text-[9px] text-[var(--text-quaternary)]">
+              <span className="font-mono">{fmtSats(t.amount)} ({fmt(t.amount * t.price)} {quote})</span>
               <span>{new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
             </div>
           </div>
@@ -451,47 +485,46 @@ function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: st
 
       {/* Desktop */}
       <div className="hidden sm:block overflow-x-auto">
-        <table className="w-full text-[13px]">
+        <table className="w-full text-[12px]">
           <thead>
-            <tr className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-wider">
-              <th className="text-left px-5 py-2.5 font-medium">Zeit</th>
-              <th className="text-left px-5 py-2.5 font-medium">Paar</th>
-              <th className="text-left px-5 py-2.5 font-medium">Typ</th>
-              <th className="text-right px-5 py-2.5 font-medium">Preis</th>
-              <th className="text-right px-5 py-2.5 font-medium">Menge (BTC)</th>
-              <th className="text-right px-5 py-2.5 font-medium">Wert ({quote})</th>
-              <th className="text-right px-5 py-2.5 font-medium">PnL</th>
+            <tr className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider">
+              <th className="text-left px-4 py-2 font-medium">Zeit</th>
+              <th className="text-left px-4 py-2 font-medium">Typ</th>
+              <th className="text-right px-4 py-2 font-medium">Preis</th>
+              <th className="text-right px-4 py-2 font-medium">Menge</th>
+              <th className="text-right px-4 py-2 font-medium">Wert</th>
+              <th className="text-right px-4 py-2 font-medium">PnL</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border-subtle)]">
-            {trades.map((t) => (
+            {shown.map((t) => (
               <tr key={t.id} className="hover:bg-[var(--bg-card-hover)] transition-colors">
-                <td className="px-5 py-2.5 font-mono text-[11px] text-[var(--text-tertiary)]">
-                  {new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                <td className="px-4 py-2 font-mono text-[10px] text-[var(--text-tertiary)]">
+                  {new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                 </td>
-                <td className="px-5 py-2.5 font-medium">{t.pair}</td>
-                <td className="px-5 py-2.5">
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold" style={{
+                <td className="px-4 py-2">
+                  <span className="inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold" style={{
                     background: t.side === "buy" ? "var(--up-bg)" : "var(--down-bg)",
                     color: t.side === "buy" ? "var(--up)" : "var(--down)"
-                  }}>
-                    {t.side === "buy" ? "KAUF" : "VERKAUF"}
-                  </span>
+                  }}>{t.side === "buy" ? "KAUF" : "VERK."}</span>
                 </td>
-                <td className="px-5 py-2.5 text-right font-mono">{fmt(t.price)}</td>
-                <td className="px-5 py-2.5 text-right font-mono text-[var(--text-secondary)]">
-                  <span>{fmtBtc(t.amount)}</span>
-                  <span className="block text-[10px] text-[var(--text-quaternary)]">{fmtSats(t.amount)}</span>
-                </td>
-                <td className="px-5 py-2.5 text-right font-mono text-[var(--text-secondary)]">{fmt(t.amount * t.price)} {quote}</td>
-                <td className="px-5 py-2.5 text-right font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
-                  {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)} {quote}
+                <td className="px-4 py-2 text-right font-mono">{fmt(t.price, 0)}</td>
+                <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmtSats(t.amount)}</td>
+                <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmt(t.amount * t.price)} {quote}</td>
+                <td className="px-4 py-2 text-right font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
+                  {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {trades.length > 10 && (
+        <button onClick={() => setExpanded(!expanded)} className="w-full py-2 text-[10px] text-[var(--accent)] hover:bg-[var(--bg-card-hover)] transition-colors border-t border-[var(--border-subtle)]">
+          {expanded ? "Weniger anzeigen" : `Alle ${trades.length} Trades anzeigen`}
+        </button>
+      )}
     </div>
   );
 }
@@ -501,44 +534,39 @@ function Steuerung({ status, commands, onCommand }: {
 }) {
   const laeuft = status === "running";
   const gestoppt = status === "stopped" || status === "paused";
-  const labels: Record<string, string> = { stop: "Stoppen", resume: "Fortsetzen", pause: "Pausieren", status: "Status", performance: "Performance", update_config: "Config" };
   const stLabels: Record<string, string> = { completed: "OK", failed: "Fehler", pending: "..." };
+  const labels: Record<string, string> = { stop: "Stoppen", resume: "Fortsetzen", pause: "Pausieren", status: "Status", performance: "Performance", update_config: "Config" };
 
   const btn = (t: string, lbl: string, col: string) => (
     <button key={t} onClick={() => onCommand(t)}
-      className="px-4 py-2.5 rounded-xl text-xs font-semibold transition-all active:scale-95"
+      className="px-3 py-2 rounded-lg text-[10px] font-semibold transition-all active:scale-95"
       style={{ background: `color-mix(in srgb, ${col} 10%, transparent)`, color: col, border: `1px solid color-mix(in srgb, ${col} 15%, transparent)` }}
     >{lbl}</button>
   );
 
   return (
-    <div className="card p-5">
-      <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium mb-4">Steuerung</h3>
-      <div className="flex flex-wrap gap-2 mb-5">
+    <div className="card p-4 sm:p-5 h-full">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-3">Steuerung</h3>
+      <div className="flex flex-wrap gap-1.5 mb-4">
         {laeuft && <>{btn("pause", "Pausieren", "var(--warn)")}{btn("stop", "Stoppen", "var(--down)")}</>}
         {gestoppt && btn("resume", "Fortsetzen", "var(--up)")}
-        {btn("status", "Status abrufen", "var(--accent)")}
+        {btn("status", "Status", "var(--accent)")}
       </div>
       {commands.length > 0 && (
-        <>
-          <p className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-wider mb-2 font-medium">Befehlshistorie</p>
-          <div className="space-y-1 max-h-36 overflow-y-auto">
-            {commands.map((c) => (
-              <div key={c.id} className="flex items-center gap-2 text-[11px] py-1.5 px-2.5 rounded-lg hover:bg-[var(--bg-secondary)]">
-                <span className="text-[var(--text-quaternary)] font-mono w-10 shrink-0">
-                  {new Date(c.createdAt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-                <span className="text-[var(--text-secondary)] font-medium">{labels[c.type] || c.type}</span>
-                <span className="ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded" style={{
-                  background: c.status === "completed" ? "var(--up-bg)" : c.status === "failed" ? "var(--down-bg)" : "var(--warn-bg)",
-                  color: c.status === "completed" ? "var(--up)" : c.status === "failed" ? "var(--down)" : "var(--warn)",
-                }}>
-                  {stLabels[c.status] || c.status}
-                </span>
-              </div>
-            ))}
-          </div>
-        </>
+        <div className="space-y-1 max-h-28 overflow-y-auto">
+          {commands.slice(0, 8).map((c) => (
+            <div key={c.id} className="flex items-center gap-2 text-[10px] py-1 px-2 rounded hover:bg-[var(--bg-secondary)]">
+              <span className="text-[var(--text-quaternary)] font-mono w-9 shrink-0">
+                {new Date(c.createdAt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
+              </span>
+              <span className="text-[var(--text-tertiary)]">{labels[c.type] || c.type}</span>
+              <span className="ml-auto text-[8px] font-bold px-1 py-0.5 rounded" style={{
+                background: c.status === "completed" ? "var(--up-bg)" : c.status === "failed" ? "var(--down-bg)" : "var(--warn-bg)",
+                color: c.status === "completed" ? "var(--up)" : c.status === "failed" ? "var(--down)" : "var(--warn)",
+              }}>{stLabels[c.status] || c.status}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -601,8 +629,7 @@ export default function Dashboard() {
   const totalTrades = pairs.reduce((s, [, m]) => s + (m.trade_count || 0), 0);
   const totalEquity = pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
   const maxDd = Math.max(...pairs.map(([, m]) => m.max_drawdown_pct || 0), 0);
-  const avgSharpe = pairs.length ? pairs.reduce((s, [, m]) => s + (m.sharpe_ratio || 0), 0) / pairs.length : 0;
-  const avgReturn = pairs.length ? pairs.reduce((s, [, m]) => s + (m.annualized_return_pct || 0), 0) / pairs.length : 0;
+
   const pnlData = useMemo(() => {
     if (isDemo) return demoPnl;
     if (!trades.length) return [];
@@ -618,70 +645,90 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="min-h-[85vh] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm text-[var(--text-secondary)]">Verbinde mit RichBot...</p>
+      <div className="max-w-[1400px] mx-auto px-4 py-5 sm:px-6">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+          {[1,2,3,4].map(i => <Skeleton key={i} h={70} />)}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
+          <Skeleton h={300} />
+          <Skeleton h={300} />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <Skeleton h={250} />
+          <Skeleton h={250} />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-[1400px] mx-auto px-4 py-5 sm:px-6 pb-16">
-      {/* Demo Banner */}
+    <div className="max-w-[1400px] mx-auto px-4 py-4 sm:px-6 pb-12">
+      {/* Banners */}
       {isDemo && (
-        <div className="mb-4 px-4 py-2.5 rounded-xl text-[11px] font-medium text-center" style={{ background: "var(--accent-bg)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 15%, transparent)" }}>
-          Demo-Modus — Datenbank nicht erreichbar. Prufe die Umgebungsvariablen.
+        <div className="mb-3 px-3 py-2 rounded-lg text-[10px] font-medium text-center" style={{ background: "var(--accent-bg)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 15%, transparent)" }}>
+          Demo-Modus — Datenbank nicht erreichbar
         </div>
       )}
-
-      {/* Waiting for Bot */}
       {!isDemo && status.status === "waiting" && (
-        <div className="mb-4 px-4 py-2.5 rounded-xl text-[11px] font-medium text-center" style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
-          Datenbank verbunden — Warte auf Raspberry Pi. Starte den Bot, um Live-Daten zu sehen.
+        <div className="mb-3 px-3 py-2 rounded-lg text-[10px] font-medium text-center" style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
+          Warte auf Raspberry Pi...
         </div>
       )}
 
       {/* Header */}
-      <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-5">
+      <header className="flex items-center justify-between gap-3 mb-4">
         <StatusBadge status={status.status} hb={status.lastHeartbeat} />
-        <div className="flex items-center gap-3 text-[11px] text-[var(--text-tertiary)]">
-          <span>Laufzeit: <strong className="text-[var(--text-secondary)]">{laufzeit(status.startedAt)}</strong></span>
-          <span className="w-px h-3 bg-[var(--border)]" />
-          <span>{status.pairs.length} Paare</span>
-          <span className="w-px h-3 bg-[var(--border)]" />
+        <div className="flex items-center gap-2 text-[10px] text-[var(--text-quaternary)]">
+          <span>{laufzeit(status.startedAt)}</span>
+          <span className="w-px h-2.5 bg-[var(--border)]" />
           <span>v{status.version}</span>
         </div>
       </header>
 
-      {/* Top Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
-        <Stat label="Gesamt-PnL" wert={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 4)}`} sub={quoteCcy} farbe={totalPnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} klein />
-        <Stat label="Kapital" wert={fmt(totalEquity)} sub={quoteCcy} klein />
-        <Stat label="Trades" wert={totalTrades.toLocaleString("de-DE")} sub="gesamt" klein />
-        <Stat label="Drawdown" wert={`${fmt(maxDd)}%`} farbe={maxDd > 5 ? "text-[var(--down)]" : "text-[var(--warn)]"} klein />
-        <Stat label="Sharpe" wert={fmt(avgSharpe)} farbe={avgSharpe > 1.5 ? "text-[var(--up)]" : ""} klein />
-        <Stat label="Rendite p.a." wert={`${fmt(avgReturn)}%`} farbe={avgReturn > 0 ? "text-[var(--up)]" : "text-[var(--down)]"} klein />
+      {/* Quick Stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <MiniStat label="Gesamt-PnL" wert={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 4)}`} farbe={totalPnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} />
+        <MiniStat label={`Kapital (${quoteCcy})`} wert={fmt(totalEquity)} />
+        <MiniStat label="Trades" wert={totalTrades.toLocaleString("de-DE")} />
+        <MiniStat label="Drawdown" wert={`${fmt(maxDd)}%`} farbe={maxDd > 5 ? "text-[var(--down)]" : "text-[var(--warn)]"} />
       </div>
 
-      {/* Pair Cards */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
-        {pairs.map(([p, m]) => <PairKarte key={p} pair={p} m={m} quote={quoteCcy} />)}
+      {/* Main Grid: Price Chart + Pair Card */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-3">
+        <div className="lg:col-span-3">
+          {pairs.length > 0
+            ? <PreisChart pair={pairs[0][0]} orders={pairs[0][1].open_orders} quote={quoteCcy} />
+            : <PreisChart pair="BTC/USDC" quote={quoteCcy} />
+          }
+        </div>
+        <div className="lg:col-span-2">
+          {pairs.length > 0
+            ? <PairKarte pair={pairs[0][0]} m={pairs[0][1]} quote={quoteCcy} />
+            : <div className="card p-5 h-full flex items-center justify-center text-[11px] text-[var(--text-quaternary)]">Keine Paare aktiv</div>
+          }
+        </div>
       </div>
 
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
-        {pairs.length > 0 && <PreisChart pair={pairs[0][0]} orders={pairs[0][1].open_orders} quote={quoteCcy} />}
+      {/* Additional Pairs */}
+      {pairs.length > 1 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          {pairs.slice(1).map(([p, m]) => <PairKarte key={p} pair={p} m={m} quote={quoteCcy} />)}
+        </div>
+      )}
+
+      {/* Charts Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
         <EquityChart data={equity} quote={quoteCcy} />
-        {pnlData.length > 0 && <PnlChart data={pnlData} quote={quoteCcy} />}
-        {pnlData.length === 0 && pairs.length === 0 && <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">PnL-Chart erscheint nach ersten Trades</div>}
+        {pnlData.length > 0
+          ? <PnlChart data={pnlData} quote={quoteCcy} />
+          : <div className="card p-5 h-full flex items-center justify-center text-[10px] text-[var(--text-quaternary)]">PnL-Chart nach ersten Trades</div>
+        }
       </div>
 
       {/* Trades + Controls */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <div className="lg:col-span-2"><TradesTabelle trades={trades} quote={quoteCcy} /></div>
-        <div><Steuerung status={status.status} commands={commands} onCommand={handleCommand} /></div>
+        <Steuerung status={status.status} commands={commands} onCommand={handleCommand} />
       </div>
     </div>
   );

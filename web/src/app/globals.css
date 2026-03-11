@@ -85,7 +85,12 @@ input[type="number"]::-webkit-outer-spin-button { opacity: 0; }
 .pulse-live { animation: pulse-live 2s ease-in-out infinite; }
 
 @keyframes fade-in {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.fade-in { animation: fade-in 0.4s ease-out; }
+.fade-in { animation: fade-in 0.3s ease-out; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
