@@ -1,24 +1,45 @@
 #!/usr/bin/env bash
-# RichBot Raspberry Pi 5 Setup Script
+# RichBot Raspberry Pi Setup Script
 # Run as: sudo bash scripts/setup_pi.sh
 set -euo pipefail
 
-INSTALL_DIR="/home/pi/richbot"
+ACTUAL_USER="${SUDO_USER:-pi}"
+INSTALL_DIR="/home/$ACTUAL_USER/richbot"
 VENV_DIR="$INSTALL_DIR/.venv"
-USER="pi"
 
 echo "==========================================="
-echo "  RichBot — Raspberry Pi 5 Setup"
+echo "  RichBot — Raspberry Pi Setup"
 echo "==========================================="
+echo "  User: $ACTUAL_USER"
+echo "  Install: $INSTALL_DIR"
+echo "==========================================="
+
+# --- Detect Python ---
+PYTHON=""
+for v in python3.12 python3.11 python3; do
+    if command -v $v &>/dev/null; then
+        PYTHON=$v
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    echo "ERROR: No Python 3 found!"
+    exit 1
+fi
+PY_VERSION=$($PYTHON --version 2>&1)
+echo "  Python: $PY_VERSION ($PYTHON)"
 
 # --- System Dependencies ---
 echo "[1/8] Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq \
-    python3.11 python3.11-venv python3.11-dev \
-    libatlas-base-dev \
+    python3-venv python3-dev python3-pip \
+    libopenblas-dev \
     build-essential git \
-    sqlite3
+    sqlite3 || {
+    echo "  Some packages failed, trying alternatives..."
+    apt-get install -y -qq python3-full python3-dev build-essential git sqlite3
+}
 
 # --- Swap Configuration ---
 echo "[2/8] Configuring swap..."
@@ -53,22 +74,22 @@ echo "[4/8] Setting up project..."
 if [ ! -d "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
     cp -r . "$INSTALL_DIR/"
-    chown -R $USER:$USER "$INSTALL_DIR"
+    chown -R $ACTUAL_USER:$ACTUAL_USER "$INSTALL_DIR"
 fi
 
 mkdir -p "$INSTALL_DIR"/{data,models,logs}
-chown -R $USER:$USER "$INSTALL_DIR"/{data,models,logs}
+chown -R $ACTUAL_USER:$ACTUAL_USER "$INSTALL_DIR"/{data,models,logs}
 
 # --- Python Virtual Environment ---
 echo "[5/8] Creating Python environment..."
-sudo -u $USER python3.11 -m venv "$VENV_DIR"
-sudo -u $USER "$VENV_DIR/bin/pip" install --upgrade pip wheel
-sudo -u $USER "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements_pi.txt"
+sudo -u $ACTUAL_USER $PYTHON -m venv "$VENV_DIR"
+sudo -u $ACTUAL_USER "$VENV_DIR/bin/pip" install --upgrade pip wheel
+sudo -u $ACTUAL_USER "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements_pi.txt"
 
 # --- tmpfs for Logs (RAM-based, reduces SD writes) ---
 echo "[6/8] Setting up tmpfs for logs..."
 if ! grep -q "richbot/logs" /etc/fstab; then
-    echo "tmpfs $INSTALL_DIR/logs tmpfs defaults,noatime,nosuid,nodev,size=32M,mode=0755,uid=$(id -u $USER),gid=$(id -g $USER) 0 0" >> /etc/fstab
+    echo "tmpfs $INSTALL_DIR/logs tmpfs defaults,noatime,nosuid,nodev,size=32M,mode=0755,uid=$(id -u $ACTUAL_USER),gid=$(id -g $ACTUAL_USER) 0 0" >> /etc/fstab
     mount -a 2>/dev/null || true
     echo "  Logs directory mounted as tmpfs (32MB RAM disk)"
     echo "  Note: Logs are lost on reboot — use journalctl for persistent logs"
@@ -76,7 +97,45 @@ fi
 
 # --- SystemD Service ---
 echo "[7/8] Installing systemd service..."
-cp "$INSTALL_DIR/scripts/richbot.service" /etc/systemd/system/richbot.service
+cat > /etc/systemd/system/richbot.service << SVCEOF
+[Unit]
+Description=RichBot Grid Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$ACTUAL_USER
+Group=$ACTUAL_USER
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$VENV_DIR/bin/python main.py --config config_pi.json
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+MemoryMax=512M
+MemoryHigh=384M
+CPUWeight=80
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=richbot
+
+Environment=PYTHONUNBUFFERED=1
+Environment=TF_CPP_MIN_LOG_LEVEL=3
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=MALLOC_TRIM_THRESHOLD_=100000
+EnvironmentFile=-$INSTALL_DIR/.env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$INSTALL_DIR/data $INSTALL_DIR/logs $INSTALL_DIR/models
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
 systemctl daemon-reload
 systemctl enable richbot.service
 echo "  Service installed (start with: sudo systemctl start richbot)"
