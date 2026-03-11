@@ -44,6 +44,7 @@ class OrderManager:
         self._fill_callbacks: list = []
         self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
         self.last_fail_reason: str = ""
+        self._consecutive_fails: int = 0
 
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
@@ -61,6 +62,10 @@ class OrderManager:
         can_trade, reason = self.risk.can_trade()
         if not can_trade:
             logger.warning("Trading paused: %s", reason)
+            return []
+
+        if self._consecutive_fails >= 3:
+            self._consecutive_fails -= 1
             return []
 
         levels = self.grid.get_levels_to_place()
@@ -90,15 +95,19 @@ class OrderManager:
                 self.orders[order["id"]] = managed
                 placed.append(managed)
 
-                self.risk.add_trailing_stop(level.level_id, level.side, level.price)
+                self.risk.add_trailing_stop(level.level_id, level.side, level.price, pair=symbol)
 
                 logger.info("Order placed: %s %s %.6f @ %.2f [%s]",
                             level.side, symbol, level.amount, level.price, order["id"])
 
             except Exception as e:
                 self.last_fail_reason = str(e)
-                logger.error("Failed to place %s order @ %.2f: %s", level.side, level.price, e)
+                self._consecutive_fails += 1
+                if self._consecutive_fails <= 3:
+                    logger.error("Failed to place %s order @ %.2f: %s", level.side, level.price, e)
 
+        if placed:
+            self._consecutive_fails = 0
         return placed
 
     async def cancel_all(self, symbol: str):
@@ -190,9 +199,9 @@ class OrderManager:
             return gross - 2 * fee
         return -fee
 
-    def check_trailing_stops(self, current_price: float) -> list[str]:
-        """Check trailing stops and return triggered level IDs."""
-        return self.risk.check_trailing_stops(current_price)
+    def check_trailing_stops(self, current_price: float, pair: str = "") -> list[str]:
+        """Check trailing stops for a specific pair and return triggered level IDs."""
+        return self.risk.check_trailing_stops(current_price, pair=pair)
 
     def get_open_orders(self, symbol: str | None = None) -> list[ManagedOrder]:
         orders = [o for o in self.orders.values() if o.status == "open"]

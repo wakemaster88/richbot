@@ -151,11 +151,14 @@ class PairBot:
         min_amount_for_notional = (min_notional * 1.15) / self.current_price
         import math
         min_amount_for_notional = math.ceil(min_amount_for_notional / step_size) * step_size
+
+        dynamic_amount = math.floor(dynamic_amount / step_size) * step_size
+
         if dynamic_amount * self.current_price < min_notional * 1.1:
             dynamic_amount = min_amount_for_notional
             logger.warning(
-                "%s amount angepasst → %.8f BTC (≈%.2f %s) um Notional-Minimum %.2f zu erfuellen",
-                self.pair, dynamic_amount, dynamic_amount * self.current_price, self.quote, min_notional,
+                "%s amount angepasst → %.8f %s (≈%.2f %s) um Notional-Minimum %.2f zu erfuellen",
+                self.pair, dynamic_amount, base, dynamic_amount * self.current_price, self.quote, min_notional,
             )
 
         grid_count = self.pair_grid_count
@@ -216,7 +219,7 @@ class PairBot:
         if not can_trade:
             return
 
-        triggered = self.order_mgr.check_trailing_stops(price)
+        triggered = self.order_mgr.check_trailing_stops(price, pair=self.pair)
         if triggered:
             logger.info("%s: %d trailing stops triggered", self.pair, len(triggered))
             for level_id in triggered:
@@ -646,7 +649,7 @@ class MultiPairBot:
                                 opposite.order_id = order["id"]
                                 bot.order_mgr.orders[order["id"]] = OrderManager.create_managed(
                                     order["id"], pair, opposite)
-                                bot.risk.add_trailing_stop(opposite.level_id, opposite.side, opposite.price)
+                                bot.risk.add_trailing_stop(opposite.level_id, opposite.side, opposite.price, pair=pair)
                                 logger.info("Gegenseite platziert: %s %s @ %.2f", opposite.side, pair, opposite.price)
                             except Exception as e:
                                 logger.warning("Gegenseite fehlgeschlagen: %s %s @ %.2f: %s",

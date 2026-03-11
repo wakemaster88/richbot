@@ -68,6 +68,7 @@ class RiskManager:
     def __init__(self, config: RiskConfig):
         self.config = config
         self.state = RiskState()
+        self._stop_pairs: dict[str, str] = {}
 
     def calculate_kelly_fraction(self, win_rate: float | None = None, avg_win: float | None = None,
                                   avg_loss: float | None = None) -> float:
@@ -157,7 +158,8 @@ class RiskManager:
             self.state.loss_count += 1
             self.state.total_loss += pnl
 
-    def add_trailing_stop(self, level_id: str, side: str, entry_price: float):
+    def add_trailing_stop(self, level_id: str, side: str, entry_price: float,
+                          pair: str = ""):
         """Add a trailing stop for a grid level."""
         self.state.trailing_stops[level_id] = TrailingStop(
             grid_level=entry_price,
@@ -166,16 +168,20 @@ class RiskManager:
             highest_price=entry_price if side == "buy" else 0.0,
             lowest_price=entry_price if side == "sell" else float("inf"),
         )
+        self._stop_pairs[level_id] = pair
 
-    def check_trailing_stops(self, current_price: float) -> list[str]:
-        """Check all trailing stops. Returns list of triggered level IDs."""
+    def check_trailing_stops(self, current_price: float, pair: str = "") -> list[str]:
+        """Check trailing stops for a specific pair. Returns list of triggered level IDs."""
         triggered = []
         for level_id, stop in self.state.trailing_stops.items():
+            if pair and self._stop_pairs.get(level_id, "") != pair:
+                continue
             if stop.update(current_price, self.config.trailing_stop_percent):
                 triggered.append(level_id)
                 logger.info("Trailing stop triggered: %s at %.2f (stop=%.2f)", level_id, current_price, stop.stop_price)
         for lid in triggered:
             del self.state.trailing_stops[lid]
+            self._stop_pairs.pop(lid, None)
         return triggered
 
     def can_trade(self) -> tuple[bool, str]:
