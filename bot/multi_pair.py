@@ -277,7 +277,8 @@ class MultiPairBot:
             self.config.exchange.api_secret = api_secret
         if api_key and api_secret:
             self.config.exchange.sandbox = False
-            logger.info("Real API keys loaded — sandbox disabled")
+            masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) > 8 else "???"
+            logger.info("Real API keys loaded — sandbox disabled (key=%s, len=%d)", masked_key, len(api_key))
         if tg_token:
             self.config.telegram.bot_token = tg_token
         if tg_chat:
