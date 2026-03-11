@@ -29,7 +29,7 @@
     "volatility_scaling": true
   },
   "ml": {
-    "enabled": true,
+    "enabled": false,
     "confidence_threshold": 0.70,
     "retrain_interval_hours": 72,
     "lookback_days": 60,
@@ -52,7 +52,7 @@
     "daily_report": true
   },
   "websocket": {
-    "enabled": true,
+    "enabled": false,
     "reconnect_delay": 5,
     "max_reconnect_attempts": 50,
     "ping_interval": 30

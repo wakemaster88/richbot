@@ -149,7 +149,7 @@ class PairBot:
                 self.current_range = new_range
 
                 try:
-                    ohlcv = self.exchange.fetch_ohlcv(
+                    ohlcv = await self.exchange.async_fetch_ohlcv(
                         self.pair, timeframe=self.config.atr.timeframe, limit=50
                     )
                     closes = [c[4] for c in ohlcv]
@@ -157,7 +157,7 @@ class PairBot:
                 except Exception:
                     vol = 0.02
 
-                balance = self.exchange.fetch_balance()
+                balance = await self.exchange.async_fetch_balance()
                 usdt = balance.get("USDT", {}).get("free", 10000)
                 dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
 
@@ -462,9 +462,9 @@ class MultiPairBot:
             for pair, bot in self.pair_bots.items():
                 try:
                     fetch_limit = self.config.pi.ohlcv_fetch_limit if self.config.is_pi else 200
-                    ohlcv = self.exchange.fetch_ohlcv(pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
+                    ohlcv = await self.exchange.async_fetch_ohlcv(pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
                     df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                    ticker = self.exchange.fetch_ticker(pair)
+                    ticker = await self.exchange.async_fetch_ticker(pair)
                     price = ticker["last"]
 
                     new_range = compute_dynamic_range(
@@ -481,7 +481,7 @@ class MultiPairBot:
                             bot.current_range = new_range
 
                             vol = self.risk.calculate_volatility(df["close"].values)
-                            balance = self.exchange.fetch_balance()
+                            balance = await self.exchange.async_fetch_balance()
                             usdt = balance.get("USDT", {}).get("free", 10000)
                             dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
 

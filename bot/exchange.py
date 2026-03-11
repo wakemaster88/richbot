@@ -90,12 +90,6 @@ class Exchange:
         lot_f = filters.get("LOT_SIZE", {})
         notional = filters.get("NOTIONAL", filters.get("MIN_NOTIONAL", {}))
 
-        def _precision(step: str) -> int:
-            step = step.rstrip("0")
-            if "." in step:
-                return len(step.split(".")[1])
-            return 0
-
         return {
             "id": data["symbol"],
             "symbol": symbol,
@@ -112,8 +106,8 @@ class Exchange:
             "option": False,
             "contract": False,
             "precision": {
-                "amount": _precision(lot_f.get("stepSize", "0.00001")),
-                "price": _precision(price_f.get("tickSize", "0.01")),
+                "amount": float(lot_f.get("stepSize", "0.00001")),
+                "price": float(price_f.get("tickSize", "0.01")),
             },
             "limits": {
                 "amount": {
