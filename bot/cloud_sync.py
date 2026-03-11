@@ -208,6 +208,22 @@ class CloudSync:
             logger.warning("Config fetch failed: %s", e)
         return None
 
+    async def log_event(self, category: str, message: str,
+                        detail: dict | None = None, level: str = "info"):
+        """Log a structured event to the database for the dashboard activity feed."""
+        if not self._pool:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO bot_events (id, bot_id, level, category, message, detail) "
+                    "VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+                    _uid(), self.bot_id, level, category, message,
+                    json.dumps(detail) if detail else None,
+                )
+        except Exception:
+            pass
+
     # -- Internal loops --
 
     async def _heartbeat_loop(self):
@@ -449,4 +465,15 @@ CREATE TABLE IF NOT EXISTS bot_secrets (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(bot_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS bot_events (
+    id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    level TEXT NOT NULL DEFAULT 'info',
+    category TEXT NOT NULL,
+    message TEXT NOT NULL,
+    detail JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_bot_events_ts ON bot_events (bot_id, timestamp DESC);
 """

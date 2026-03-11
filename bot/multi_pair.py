@@ -92,6 +92,11 @@ class PairBot:
 
         if self.cloud and self.cloud.connected:
             asyncio.create_task(self.cloud.sync_trade(trade))
+            asyncio.create_task(self.cloud.log_event(
+                "trade", f"{'Kauf' if managed_order.side == 'buy' else 'Verkauf'} {self.pair} @ {managed_order.fill_price:.2f}",
+                {"side": managed_order.side, "price": managed_order.fill_price,
+                 "amount": managed_order.amount, "pnl": managed_order.pnl},
+            ))
 
     async def initialize(self):
         """Set up initial grid."""
@@ -183,11 +188,21 @@ class PairBot:
         except Exception as e:
             logger.error("Failed to place initial orders for %s: %s", self.pair, e)
 
+        actual_levels = len(self.grid.state.levels)
         logger.info(
             "%s initialized: price=%.2f, range=[%.2f, %.2f], levels=%d",
             self.pair, self.current_price, self.current_range.lower,
-            self.current_range.upper, len(self.grid.state.levels),
+            self.current_range.upper, actual_levels,
         )
+
+        if self.cloud and self.cloud.connected:
+            asyncio.create_task(self.cloud.log_event(
+                "system", f"{self.pair} gestartet — {actual_levels} Level, Preis {self.current_price:.2f}",
+                {"pair": self.pair, "price": self.current_price,
+                 "range": [self.current_range.lower, self.current_range.upper],
+                 "levels": actual_levels, "amount": dynamic_amount,
+                 "quote_free": usdt_balance, "base_free": base_free},
+            ))
 
     async def update_tick(self, price: float):
         """Process a price update."""
@@ -219,7 +234,16 @@ class PairBot:
                 new_range = shift_range(self.current_range, breakout)
                 self.current_range = new_range
                 self.grid.trail_grid(breakout, price, new_range, self.pair_amount)
-                await self.order_mgr.place_grid_orders(self.pair)
+                placed = await self.order_mgr.place_grid_orders(self.pair)
+
+                if self.cloud and self.cloud.connected:
+                    asyncio.create_task(self.cloud.log_event(
+                        "grid", f"Range-Verschiebung {breakout} — Grid neu berechnet",
+                        {"direction": breakout, "price": price,
+                         "new_range": [new_range.lower, new_range.upper],
+                         "levels": len(self.grid.state.levels),
+                         "orders_placed": len(placed)},
+                    ))
 
                 await self.telegram.alert_range_shift(
                     self.pair, breakout, new_range.lower, new_range.upper,
@@ -613,10 +637,22 @@ class MultiPairBot:
                             except Exception as e:
                                 logger.warning("Gegenseite fehlgeschlagen: %s %s @ %.2f: %s",
                                                opposite.side, pair, opposite.price, e)
+                                if self.cloud.connected:
+                                    asyncio.create_task(self.cloud.log_event(
+                                        "error", f"Gegenseite fehlgeschlagen: {opposite.side} @ {opposite.price:.2f}",
+                                        {"pair": pair, "side": opposite.side, "price": opposite.price, "reason": str(e)},
+                                        level="warn",
+                                    ))
 
                     unplaced = bot.grid.get_levels_to_place()
                     if unplaced:
-                        await bot.order_mgr.place_grid_orders(pair)
+                        recovered = await bot.order_mgr.place_grid_orders(pair)
+                        if recovered and self.cloud.connected:
+                            asyncio.create_task(self.cloud.log_event(
+                                "grid", f"{len(recovered)} Order(s) nachplatziert",
+                                {"pair": pair, "count": len(recovered),
+                                 "orders": [{"side": o.side, "price": o.price} for o in recovered]},
+                            ))
 
                 except Exception as e:
                     logger.error("Poll error for %s: %s", pair, e)
@@ -758,6 +794,12 @@ class MultiPairBot:
                         "%s Auto-Grid: %d → %d Level (~%.2f%%/Tag, Kapital: %.2f %s, %.8f %s/Order)",
                         pair, old, best_n, daily_pct, total_equity, bot.quote, best_amount, bot.base,
                     )
+                    if self.cloud.connected:
+                        asyncio.create_task(self.cloud.log_event(
+                            "grid", f"Auto-Grid: {old} → {best_n} Level (~{daily_pct:.2f}%/Tag)",
+                            {"pair": pair, "old_levels": old, "new_levels": best_n,
+                             "daily_pct": daily_pct, "equity": total_equity, "amount": best_amount},
+                        ))
             except Exception as e:
                 logger.warning("Auto-grid adjust failed for %s: %s", pair, e)
 
@@ -924,6 +966,10 @@ class MultiPairBot:
             if self.cloud.connected:
                 metrics = {p: b.get_status() for p, b in self.pair_bots.items()}
                 self.cloud.update_status("running", self.config.pairs, metrics)
+                asyncio.create_task(self.cloud.log_event(
+                    "config", f"Einstellungen aktualisiert: {', '.join(updated[:5])}",
+                    {"keys": updated},
+                ))
             return {"updated": updated}
 
         async def cmd_update_software(payload):

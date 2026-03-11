@@ -97,3 +97,16 @@ model BotSecret {
   @@unique([botId, key])
   @@map("bot_secrets")
 }
+
+model BotEvent {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  timestamp DateTime @default(now())
+  level     String   @default("info")
+  category  String
+  message   String
+  detail    Json?
+
+  @@index([botId, timestamp(sort: Desc)])
+  @@map("bot_events")
+}

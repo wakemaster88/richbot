@@ -32,6 +32,10 @@ interface CommandRecord {
   id: string; type: string; status: string; createdAt: string;
   result: Record<string, unknown> | null;
 }
+interface BotEvent {
+  id: string; timestamp: string; level: string; category: string;
+  message: string; detail: Record<string, unknown> | null;
+}
 
 // -- Demo Data --
 
@@ -442,6 +446,64 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
   );
 }
 
+const EVT_ICONS: Record<string, string> = {
+  trade: "T", grid: "G", error: "!", config: "C", system: "S",
+};
+const EVT_COLORS: Record<string, string> = {
+  trade: "var(--accent)", grid: "var(--cyan)", error: "var(--down)",
+  warn: "var(--warn)", config: "var(--text-secondary)", system: "var(--text-tertiary)",
+};
+
+function AktivitaetsFeed({ events }: { events: BotEvent[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? events : events.slice(0, 12);
+
+  if (!events.length) return null;
+
+  return (
+    <div className="card p-4 sm:p-5 h-full">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Aktivitaet</h3>
+        <span className="text-[9px] text-[var(--text-quaternary)]">{events.length}</span>
+      </div>
+      <div className="space-y-0.5 max-h-80 overflow-y-auto">
+        {shown.map((ev) => {
+          const col = EVT_COLORS[ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : ev.category] || "var(--text-tertiary)";
+          const icon = EVT_ICONS[ev.category] || "·";
+          const zeit = new Date(ev.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          return (
+            <div key={ev.id} className="flex items-start gap-2 text-[10px] py-1.5 px-2 rounded hover:bg-[var(--bg-secondary)] transition-colors">
+              <span className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold mt-0.5"
+                style={{ background: `color-mix(in srgb, ${col} 15%, transparent)`, color: col }}>
+                {icon}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[var(--text-primary)] leading-snug">{ev.message}</p>
+                {ev.detail && (
+                  <p className="text-[9px] text-[var(--text-quaternary)] mt-0.5 font-mono truncate">
+                    {Object.entries(ev.detail as Record<string, unknown>)
+                      .filter(([k]) => !["pair"].includes(k))
+                      .slice(0, 4)
+                      .map(([k, v]) => `${k}: ${typeof v === "number" ? (Number.isInteger(v) ? v : (v as number).toFixed(4)) : v}`)
+                      .join(" · ")}
+                  </p>
+                )}
+              </div>
+              <span className="shrink-0 text-[9px] text-[var(--text-quaternary)] font-mono mt-0.5">{zeit}</span>
+            </div>
+          );
+        })}
+      </div>
+      {events.length > 12 && (
+        <button onClick={() => setExpanded(!expanded)}
+          className="mt-2 text-[10px] text-[var(--accent)] hover:underline w-full text-center">
+          {expanded ? "Weniger anzeigen" : `Alle ${events.length} Events anzeigen`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: string }) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? trades : trades.slice(0, 10);
@@ -622,6 +684,7 @@ export default function Dashboard() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [commands, setCommands] = useState<CommandRecord[]>([]);
+  const [events, setEvents] = useState<BotEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
   const [latestCommit, setLatestCommit] = useState<string | null>(null);
@@ -631,11 +694,12 @@ export default function Dashboard() {
   const demoTrades = useMemo(() => generateDemoTrades(), []);
 
   const refresh = useCallback(async () => {
-    const [s, t, e, c] = await Promise.all([
+    const [s, t, e, c, ev] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
       fetchJson<Trade[]>("/api/trades?limit=50"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
       fetchJson<CommandRecord[]>("/api/commands?limit=20"),
+      fetchJson<BotEvent[]>("/api/events?limit=30"),
     ]);
 
     if (s?.dbConnected) {
@@ -643,6 +707,7 @@ export default function Dashboard() {
       setTrades(t || []);
       setEquity(e || []);
       setCommands(c || []);
+      setEvents(ev || []);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -785,10 +850,13 @@ export default function Dashboard() {
         }
       </div>
 
-      {/* Trades + Controls */}
+      {/* Trades + Activity + Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <div className="lg:col-span-2"><TradesTabelle trades={trades} quote={quoteCcy} /></div>
-        <Steuerung status={status.status} commands={commands} onCommand={handleCommand} />
+        <div className="flex flex-col gap-3">
+          <Steuerung status={status.status} commands={commands} onCommand={handleCommand} />
+          {!isDemo && events.length > 0 && <AktivitaetsFeed events={events} />}
+        </div>
       </div>
     </div>
   );
