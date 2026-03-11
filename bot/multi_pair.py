@@ -299,19 +299,39 @@ class MultiPairBot:
         await self._start_trading()
 
     async def _test_exchange(self) -> bool:
-        """Test exchange connectivity with a simple API call."""
+        """Test exchange connectivity with a lightweight API call (no market loading)."""
+        import hmac, hashlib, time as _time
         try:
-            await self.exchange.async_fetch_ticker(self.config.pairs[0])
-            logger.info("Exchange connection OK")
-            return True
+            import aiohttp
+            api_key = self.config.exchange.api_key
+            api_secret = self.config.exchange.api_secret
+            if not api_key or not api_secret:
+                logger.error("UNGUELTIGE API-KEYS: Kein Key/Secret konfiguriert")
+                return False
+
+            ts = int(_time.time() * 1000)
+            query = f"timestamp={ts}"
+            sig = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            url = f"https://api.binance.com/api/v3/account?{query}&signature={sig}"
+            headers = {"X-MBX-APIKEY": api_key}
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    data = await resp.json()
+                    if resp.status == 200:
+                        logger.info("Binance API OK — Konto verifiziert")
+                        return True
+                    code = data.get("code", "")
+                    msg = data.get("msg", "")
+                    full = f"binance {{\"{code}\":\"{msg}\"}}"
+                    if code in (-2008, -2014, -2015):
+                        logger.error("UNGUELTIGE API-KEYS: %s", full)
+                        logger.error("Bitte gueltige Binance API-Keys im Dashboard unter Einstellungen > Secrets eintragen.")
+                    else:
+                        logger.error("Exchange-Verbindung fehlgeschlagen: %s", full)
+                    return False
         except Exception as e:
-            err = str(e)
-            etype = type(e).__name__
-            if "Api-Key" in err or "apiKey" in err or "-2008" in err or "-2014" in err or "credential" in err.lower():
-                logger.error("UNGUELTIGE API-KEYS: %s", e)
-                logger.error("Bitte gueltige Binance API-Keys im Dashboard unter Einstellungen > Secrets eintragen.")
-            else:
-                logger.error("Exchange-Verbindung fehlgeschlagen [%s]: %s", etype, e or "(kein Detail)")
+            logger.error("Exchange-Test fehlgeschlagen [%s]: %s", type(e).__name__, e or "(kein Detail)")
             return False
 
     async def _wait_for_valid_credentials(self):

@@ -32,6 +32,12 @@ class Exchange:
     def _build_params(self) -> dict[str, Any]:
         params: dict[str, Any] = {
             "enableRateLimit": self.config.rate_limit,
+            "options": {
+                "defaultType": "spot",
+                "fetchMarkets": ["spot"],
+                "loadAllCurrencies": False,
+                "warnOnFetchOpenOrdersWithoutSymbol": False,
+            },
         }
         if self.config.api_key:
             params["apiKey"] = self.config.api_key
