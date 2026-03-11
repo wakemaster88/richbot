@@ -303,14 +303,20 @@ class PairBot:
             logger.error("Equity update failed for %s: %s", self.pair, e)
 
     def get_status(self) -> dict:
+        open_orders = self.order_mgr.get_open_orders(self.pair)
+        orders_list = [
+            {"side": o.side, "price": o.price, "amount": o.amount, "id": o.order_id}
+            for o in sorted(open_orders, key=lambda x: x.price)
+        ]
         return {
             "pair": self.pair,
             "price": self.current_price,
             "range": f"[{self.current_range.lower:.2f}, {self.current_range.upper:.2f}]" if self.current_range else "N/A",
             "range_source": self.current_range.source if self.current_range else "N/A",
             "grid_levels": len(self.grid.state.levels),
-            "active_orders": len(self.order_mgr.get_open_orders(self.pair)),
+            "active_orders": len(open_orders),
             "filled_orders": len(self.order_mgr.get_filled_orders(self.pair)),
+            "open_orders": orders_list,
             "last_prediction": self.last_prediction,
             **self.tracker.get_summary(self.pair),
         }

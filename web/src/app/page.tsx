@@ -13,6 +13,7 @@ interface BotStatus {
   pairs: string[]; pairStatuses: Record<string, PairMetrics>;
   startedAt: string; version: string; dbConnected?: boolean;
 }
+interface OpenOrder { side: string; price: number; amount: number; id: string; }
 interface PairMetrics {
   pair: string; price: number; range: string; range_source: string;
   grid_levels: number; active_orders: number; filled_orders: number;
@@ -20,6 +21,7 @@ interface PairMetrics {
   trade_count: number; max_drawdown_pct: number; sharpe_ratio: number;
   current_equity: number; buy_count?: number; sell_count?: number;
   annualized_return_pct?: number; fees_paid?: number;
+  open_orders?: OpenOrder[];
 }
 interface Trade {
   id: string; timestamp: string; pair: string; side: string;
@@ -208,6 +210,33 @@ function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; 
           {m.annualized_return_pct !== undefined && <span>Jahresrendite: <strong className="text-[var(--text-secondary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
           {m.fees_paid !== undefined && <span>Gebuhren: <strong className="text-[var(--text-secondary)]">{fmt(m.fees_paid)} {quote}</strong></span>}
           <span>Kapital: <strong className="text-[var(--text-secondary)]">{fmt(m.current_equity)} {quote}</strong></span>
+        </div>
+      )}
+      {m.open_orders && m.open_orders.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-[var(--border-subtle)]">
+          <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-medium mb-2">Offene Orders</p>
+          <div className="space-y-1">
+            {m.open_orders.map((o) => {
+              const isBuy = o.side === "buy";
+              const dist = m.price > 0 ? ((o.price - m.price) / m.price * 100) : 0;
+              return (
+                <div key={o.id} className="flex items-center justify-between text-[11px] font-mono px-2.5 py-1.5 rounded-lg" style={{ background: isBuy ? "var(--up-bg)" : "var(--down-bg)" }}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ color: isBuy ? "var(--up)" : "var(--down)" }}>
+                      {isBuy ? "KAUF" : "VERK."}
+                    </span>
+                    <span className="text-[var(--text-secondary)]">{fmt(o.price)} {quote}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-[var(--text-tertiary)]">
+                    <span>{fmtSats(o.amount)}</span>
+                    <span className="text-[10px]" style={{ color: dist < 0 ? "var(--up)" : "var(--down)" }}>
+                      {dist >= 0 ? "+" : ""}{dist.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
