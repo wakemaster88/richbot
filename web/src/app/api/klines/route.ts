@@ -10,7 +10,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, { next: { revalidate: 30 } });
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return NextResponse.json({ error: "Binance API error" }, { status: 502 });
     const raw = await res.json();
 

@@ -670,18 +670,12 @@ export default function Dashboard() {
         {pairs.map(([p, m]) => <PairKarte key={p} pair={p} m={m} quote={quoteCcy} />)}
       </div>
 
-      {/* Live Price Chart */}
-      {pairs.length > 0 && (
-        <div className="mb-5">
-          <PreisChart pair={pairs[0][0]} orders={pairs[0][1].open_orders} quote={quoteCcy} />
-        </div>
-      )}
-
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+        {pairs.length > 0 && <PreisChart pair={pairs[0][0]} orders={pairs[0][1].open_orders} quote={quoteCcy} />}
         <EquityChart data={equity} quote={quoteCcy} />
         {pnlData.length > 0 && <PnlChart data={pnlData} quote={quoteCcy} />}
-        {pnlData.length === 0 && <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">PnL-Chart erscheint nach ersten Trades</div>}
+        {pnlData.length === 0 && pairs.length === 0 && <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">PnL-Chart erscheint nach ersten Trades</div>}
       </div>
 
       {/* Trades + Controls */}
