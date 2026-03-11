@@ -59,7 +59,7 @@ class Exchange:
             qs = f'symbols={_json.dumps(binance_syms)}'
 
         url = f"https://api.binance.com/api/v3/exchangeInfo?{qs}"
-        logger.info("Loading markets for %s from %s", symbols, url)
+        logger.info("Loading markets for %s", symbols)
 
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -68,7 +68,7 @@ class Exchange:
         parsed = []
         for sym_data in exchange_info.get("symbols", []):
             try:
-                parsed.append(client.parse_market(sym_data))
+                parsed.append(self._parse_binance_market(sym_data))
             except Exception as e:
                 logger.warning("Failed to parse market %s: %s", sym_data.get("symbol"), e)
 
@@ -77,6 +77,59 @@ class Exchange:
             logger.info("Loaded %d markets: %s", len(parsed), [m["symbol"] for m in parsed])
         else:
             raise RuntimeError("No markets parsed — check symbol names")
+
+    @staticmethod
+    def _parse_binance_market(data: dict) -> dict:
+        """Parse Binance exchangeInfo symbol into ccxt market format."""
+        base = data["baseAsset"]
+        quote = data["quoteAsset"]
+        symbol = f"{base}/{quote}"
+
+        filters = {f["filterType"]: f for f in data.get("filters", [])}
+        price_f = filters.get("PRICE_FILTER", {})
+        lot_f = filters.get("LOT_SIZE", {})
+        notional = filters.get("NOTIONAL", filters.get("MIN_NOTIONAL", {}))
+
+        def _precision(step: str) -> int:
+            step = step.rstrip("0")
+            if "." in step:
+                return len(step.split(".")[1])
+            return 0
+
+        return {
+            "id": data["symbol"],
+            "symbol": symbol,
+            "base": base,
+            "quote": quote,
+            "baseId": base,
+            "quoteId": quote,
+            "active": data.get("status") == "TRADING",
+            "type": "spot",
+            "spot": True,
+            "margin": False,
+            "swap": False,
+            "future": False,
+            "option": False,
+            "contract": False,
+            "precision": {
+                "amount": _precision(lot_f.get("stepSize", "0.00001")),
+                "price": _precision(price_f.get("tickSize", "0.01")),
+            },
+            "limits": {
+                "amount": {
+                    "min": float(lot_f.get("minQty", 0)),
+                    "max": float(lot_f.get("maxQty", 0)),
+                },
+                "price": {
+                    "min": float(price_f.get("minPrice", 0)),
+                    "max": float(price_f.get("maxPrice", 0)),
+                },
+                "cost": {
+                    "min": float(notional.get("minNotional", notional.get("notional", 0))),
+                },
+            },
+            "info": data,
+        }
 
     @property
     def sync(self) -> ccxt.Exchange:
