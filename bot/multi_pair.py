@@ -898,9 +898,9 @@ class MultiPairBot:
                 if price <= 0:
                     continue
 
-                quote_total = quote_bal.get("total", 0)
-                base_total = base_bal.get("total", 0)
-                total_equity = quote_total + base_total * price
+                quote_free = quote_bal.get("free", 0) + quote_bal.get("used", 0)
+                base_free = base_bal.get("free", 0) + base_bal.get("used", 0)
+                total_equity = quote_free + base_free * price
 
                 if total_equity <= 0:
                     continue
@@ -914,10 +914,15 @@ class MultiPairBot:
                 eq_per_pair = total_equity / max(1, pair_count)
                 half = eq_per_pair * 0.80 / 2
 
+                max_buy = int(half / (min_amount * price)) if price > 0 else 0
+                max_sell = int(base_free / min_amount) if min_amount > 0 else 0
+                max_affordable = (min(max_buy, max_sell) * 2) if max_sell > 0 else (max_buy * 2)
+                max_n = min(max(max_affordable, 4), 12)
+
                 best_n = 4
                 best_score = -1.0
                 best_amount = min_amount
-                for n in range(4, 22, 2):
+                for n in range(4, max_n + 1, 2):
                     score, amount = self._score_grid(n, half, price, min_amount, step_size)
                     if score > best_score:
                         best_score = score
@@ -940,20 +945,33 @@ class MultiPairBot:
                     bot.order_mgr.grid = bot.grid
 
                     if bot.current_range and price:
+                        min_fs = price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
+                        lps = max(best_n // 2, 1)
+                        min_hr = lps * min_fs * 1.15
+                        if bot.current_range.spread < min_hr * 2:
+                            bot.current_range = RangeResult(
+                                upper=price + min_hr, lower=price - min_hr,
+                                mid=price, atr=bot.current_range.atr,
+                                source=bot.current_range.source,
+                                confidence=bot.current_range.confidence,
+                            )
+
                         await bot.order_mgr.cancel_all(pair)
                         bot.grid.calculate_grid(bot.current_range, price, best_amount)
                         await bot.order_mgr.place_grid_orders(pair)
 
                     daily_pct = (best_score / eq_per_pair * 100) if eq_per_pair > 0 else 0
                     logger.info(
-                        "%s Auto-Grid: %d → %d Level (~%.2f%%/Tag, Kapital: %.2f %s, %.8f %s/Order)",
-                        pair, old, best_n, daily_pct, total_equity, bot.quote, best_amount, bot.base,
+                        "%s Auto-Grid: %d → %d Level (~%.2f%%/Tag, Kapital: %.2f %s, %.8f %s/Order, max %d leistbar)",
+                        pair, old, best_n, daily_pct, total_equity, bot.quote,
+                        best_amount, base_name, max_affordable,
                     )
                     if self.cloud.connected:
                         asyncio.create_task(self.cloud.log_event(
                             "grid", f"Auto-Grid: {old} → {best_n} Level (~{daily_pct:.2f}%/Tag)",
                             {"pair": pair, "old_levels": old, "new_levels": best_n,
-                             "daily_pct": daily_pct, "equity": total_equity, "amount": best_amount},
+                             "daily_pct": daily_pct, "equity": total_equity, "amount": best_amount,
+                             "max_affordable": max_affordable},
                         ))
             except Exception as e:
                 logger.warning("Auto-grid adjust failed for %s: %s", pair, e)

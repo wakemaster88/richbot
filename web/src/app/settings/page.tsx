@@ -777,12 +777,14 @@ function calcSmartGrid(equity: number, price: number, pairCount: number = 1): Sm
 
   const eqPerPair = equity / Math.max(1, pairCount);
   const half = eqPerPair * 0.80 / 2;
+  const maxPerSide = Math.floor(half / (minAmount * price));
+  const maxN = Math.min(Math.max(maxPerSide * 2, 4), 12);
 
   let bestN = 4;
   let bestAmount = minAmount;
   let bestScore = -1;
 
-  for (let n = 4; n <= 20; n += 2) {
+  for (let n = 4; n <= maxN; n += 2) {
     const { score, amount } = scoreGridConfig(n, half, price, minAmount, step);
     if (score > bestScore) {
       bestScore = score;
