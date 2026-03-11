@@ -296,6 +296,11 @@ class MultiPairBot:
         await self.cloud.start()
         await self.cloud.fetch_env()
 
+        db_cfg = await self.cloud.fetch_config_update()
+        if db_cfg:
+            self._apply_config(db_cfg)
+            logger.info("Dashboard-Config geladen und angewendet")
+
         import os
         api_key = os.environ.get("BINANCE_API_KEY", "").strip()
         api_secret = os.environ.get("BINANCE_SECRET", "").strip()
@@ -314,6 +319,9 @@ class MultiPairBot:
             self.config.telegram.bot_token = tg_token
         if tg_chat:
             self.config.telegram.chat_id = tg_chat
+
+        logger.info("Config: pairs=%s, grid_count=%d, amount_per_order=%.8f",
+                     self.config.pairs, self.config.grid.grid_count, self.config.grid.amount_per_order)
 
         self.exchange = Exchange(self.config.exchange)
         self.telegram = TelegramNotifier(self.config.telegram)
@@ -590,6 +598,31 @@ class MultiPairBot:
             if collected > 50:
                 logger.debug("GC collected %d objects", collected)
 
+    def _apply_config(self, payload: dict) -> list[str]:
+        """Apply a config payload dict to self.config. Returns list of updated keys."""
+        updated: list[str] = []
+        sections = ["grid", "atr", "risk", "ml", "telegram", "websocket"]
+        for section in sections:
+            if section in payload:
+                target = getattr(self.config, section, None)
+                if target is None:
+                    continue
+                for k, v in payload[section].items():
+                    if hasattr(target, k) and (section != "cloud" or k != "database_url"):
+                        setattr(target, k, v)
+                        updated.append(f"{section}.{k}")
+        if "cloud" in payload:
+            for k, v in payload["cloud"].items():
+                if hasattr(self.config.cloud, k) and k != "database_url":
+                    setattr(self.config.cloud, k, v)
+                    updated.append(f"cloud.{k}")
+        if "pairs" in payload:
+            self.config.pairs = payload["pairs"]
+            updated.append("pairs")
+        if updated:
+            logger.info("Config angewendet: %s", updated)
+        return updated
+
     async def stop(self):
         self._running = False
         for pair, bot in self.pair_bots.items():
@@ -638,49 +671,27 @@ class MultiPairBot:
         def cmd_performance(payload):
             return {"summaries": self.get_performance()}
 
-        def cmd_update_config(payload):
-            from bot.config import BotConfig
-            updated = []
-            if "grid" in payload:
-                for k, v in payload["grid"].items():
-                    if hasattr(self.config.grid, k):
-                        setattr(self.config.grid, k, v)
-                        updated.append(f"grid.{k}")
-            if "atr" in payload:
-                for k, v in payload["atr"].items():
-                    if hasattr(self.config.atr, k):
-                        setattr(self.config.atr, k, v)
-                        updated.append(f"atr.{k}")
-            if "risk" in payload:
-                for k, v in payload["risk"].items():
-                    if hasattr(self.config.risk, k):
-                        setattr(self.config.risk, k, v)
-                        updated.append(f"risk.{k}")
-            if "ml" in payload:
-                for k, v in payload["ml"].items():
-                    if hasattr(self.config.ml, k):
-                        setattr(self.config.ml, k, v)
-                        updated.append(f"ml.{k}")
-            if "telegram" in payload:
-                for k, v in payload["telegram"].items():
-                    if hasattr(self.config.telegram, k):
-                        setattr(self.config.telegram, k, v)
-                        updated.append(f"telegram.{k}")
-            if "websocket" in payload:
-                for k, v in payload["websocket"].items():
-                    if hasattr(self.config.websocket, k):
-                        setattr(self.config.websocket, k, v)
-                        updated.append(f"websocket.{k}")
-            if "cloud" in payload:
-                for k, v in payload["cloud"].items():
-                    if hasattr(self.config.cloud, k) and k != "database_url":
-                        setattr(self.config.cloud, k, v)
-                        updated.append(f"cloud.{k}")
-            if "pairs" in payload:
-                self.config.pairs = payload["pairs"]
-                updated.append("pairs")
-
-            logger.info("Config updated remotely: %s", updated)
+        async def cmd_update_config(payload):
+            updated = self._apply_config(payload)
+            if any(k.startswith("grid.") for k in updated):
+                for pair, bot in self.pair_bots.items():
+                    bot.grid = GridEngine(
+                        grid_count=self.config.grid.grid_count,
+                        spacing_percent=self.config.grid.spacing_percent,
+                        amount_per_order=self.config.grid.amount_per_order,
+                        infinity_mode=self.config.grid.infinity_mode,
+                        trail_trigger_percent=self.config.grid.trail_trigger_percent,
+                    )
+                    bot.order_mgr.grid = bot.grid
+                    if bot.current_range and bot.current_price:
+                        try:
+                            await bot.order_mgr.cancel_all(pair)
+                            bot.grid.calculate_grid(bot.current_range, bot.current_price, self.config.grid.amount_per_order)
+                            await bot.order_mgr.place_grid_orders(pair)
+                            logger.info("%s Grid neu berechnet: %d Level, %.8f pro Order",
+                                        pair, self.config.grid.grid_count, self.config.grid.amount_per_order)
+                        except Exception as e:
+                            logger.error("Grid re-init failed for %s: %s", pair, e)
             return {"updated": updated}
 
         self.cloud.on_command("stop", cmd_stop)
