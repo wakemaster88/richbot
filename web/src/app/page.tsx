@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, CartesianGrid, Cell,
+  AreaChart, Area, BarChart, Bar, ComposedChart, Line, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, CartesianGrid, Cell, ReferenceLine,
 } from "recharts";
 
 // -- Types --
@@ -317,6 +317,99 @@ function PnlChart({ data, quote = "USDC" }: { data: { zeit: string; pnl: number 
   );
 }
 
+interface Kline { t: number; o: number; h: number; l: number; c: number; v: number; }
+
+function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: OpenOrder[]; quote?: string }) {
+  const [klines, setKlines] = useState<Kline[]>([]);
+  const [interval, setInterval_] = useState("5m");
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const sym = pair.replace("/", "");
+        const res = await fetch(`/api/klines?symbol=${sym}&interval=${interval}&limit=120`);
+        if (res.ok && active) setKlines(await res.json());
+      } catch { /* ignore */ }
+    };
+    load();
+    const iv = window.setInterval(load, 30000);
+    return () => { active = false; clearInterval(iv); };
+  }, [pair, interval]);
+
+  if (!klines.length) return <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">Lade Preisdaten...</div>;
+
+  const data = klines.map((k) => ({
+    zeit: new Date(k.t).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
+    preis: k.c,
+    hoch: k.h,
+    tief: k.l,
+  }));
+
+  const allPrices = klines.flatMap((k) => [k.h, k.l]);
+  const orderPrices = (orders || []).map((o) => o.price);
+  const allVals = [...allPrices, ...orderPrices];
+  const mn = Math.min(...allVals);
+  const mx = Math.max(...allVals);
+  const pad = (mx - mn) * 0.05;
+  const last = klines[klines.length - 1]?.c || 0;
+  const first = klines[0]?.c || last;
+  const up = last >= first;
+  const col = up ? "var(--up)" : "var(--down)";
+  const chg = first > 0 ? ((last - first) / first * 100) : 0;
+
+  const intervals = ["1m", "5m", "15m", "1h", "4h", "1d"];
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium">{pair} Live-Preis</h3>
+        <div className="flex items-center gap-1">
+          {intervals.map((iv) => (
+            <button key={iv} onClick={() => setInterval_(iv)}
+              className="px-2 py-0.5 rounded text-[10px] font-mono transition-all"
+              style={{
+                background: interval === iv ? "var(--accent-bg)" : "transparent",
+                color: interval === iv ? "var(--accent)" : "var(--text-quaternary)",
+              }}>
+              {iv}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-baseline gap-2 mb-4">
+        <span className="text-2xl font-bold font-mono">{fmt(last)}</span>
+        <span className="text-xs text-[var(--text-tertiary)]">{quote}</span>
+        <span className={`text-xs font-mono font-semibold ml-1`} style={{ color: col }}>
+          {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
+        </span>
+      </div>
+      <ResponsiveContainer width="100%" height={250}>
+        <ComposedChart data={data} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="prG" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={col} stopOpacity={0.12} />
+              <stop offset="100%" stopColor={col} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+          <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 10 }} axisLine={false} tickLine={false} domain={[mn - pad, mx + pad]} width={60} tickFormatter={(v) => fmt(v, 0)} />
+          <Tooltip
+            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "8px 12px", fontSize: 12 }}
+            formatter={(v: number, name: string) => [fmt(v) + " " + quote, name === "preis" ? "Preis" : name === "hoch" ? "Hoch" : "Tief"]}
+          />
+          {(orders || []).map((o) => (
+            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "var(--up)" : "var(--down)"} strokeDasharray="4 3" strokeOpacity={0.6}
+              label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "var(--up)" : "var(--down)", fontSize: 9, position: "right" }} />
+          ))}
+          <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill="url(#prG)" dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: string }) {
   if (!trades.length) return <div className="card p-8 text-center text-sm text-[var(--text-tertiary)]">Noch keine Trades</div>;
 
@@ -576,6 +669,13 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
         {pairs.map(([p, m]) => <PairKarte key={p} pair={p} m={m} quote={quoteCcy} />)}
       </div>
+
+      {/* Live Price Chart */}
+      {pairs.length > 0 && (
+        <div className="mb-5">
+          <PreisChart pair={pairs[0][0]} orders={pairs[0][1].open_orders} quote={quoteCcy} />
+        </div>
+      )}
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
