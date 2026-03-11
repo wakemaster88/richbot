@@ -34,7 +34,7 @@ class Exchange:
         if len(binance_syms) == 1:
             qs = f"symbol={binance_syms[0]}"
         else:
-            qs = f'symbols={_json.dumps(binance_syms)}'
+            qs = f'symbols={_json.dumps(binance_syms, separators=(",", ":"))}'
 
         url = f"{_BINANCE}/api/v3/exchangeInfo?{qs}"
         logger.info("Loading markets for %s", symbols)
