@@ -78,11 +78,17 @@ class GridState:
 class GridEngine:
     """Computes and manages grid levels with trailing/infinity support."""
 
+    MIN_SPACING_VS_FEE = 2.5  # spacing must be >= 2.5x round-trip fee
+    FEE_RATE = 0.001
+
     def __init__(self, grid_count: int = 20, spacing_percent: float = 0.5,
                  amount_per_order: float = 0.001, infinity_mode: bool = True,
                  trail_trigger_percent: float = 1.5):
         self.grid_count = grid_count
-        self.spacing_percent = spacing_percent
+        self.spacing_percent = max(
+            spacing_percent,
+            self.FEE_RATE * 200 * self.MIN_SPACING_VS_FEE,
+        )
         self.amount_per_order = amount_per_order
         self.infinity_mode = infinity_mode
         self.trail_trigger_percent = trail_trigger_percent
@@ -90,24 +96,38 @@ class GridEngine:
             mode=GridMode.INFINITY if infinity_mode else GridMode.STATIC,
         )
 
+    @staticmethod
+    def _weighted_positions(count: int) -> list[float]:
+        """Sqrt-weighted positions: denser near price, sparser at boundaries."""
+        if count <= 1:
+            return [1.0]
+        raw = [((i + 1) / count) ** 0.6 for i in range(count)]
+        return raw
+
     def calculate_grid(self, range_result: RangeResult, current_price: float,
                        dynamic_amount: float | None = None) -> list[GridLevel]:
-        """Calculate grid levels within the given range."""
+        """Calculate grid levels within the given range.
+        Uses sqrt-weighted spacing: denser near current price, sparser at boundaries."""
         self.state.range_result = range_result
         self.state.last_price = current_price
         amount = dynamic_amount or self.amount_per_order
+
+        min_fee_spacing = current_price * self.FEE_RATE * 2 * self.MIN_SPACING_VS_FEE
 
         total_levels = self.grid_count
         buy_count = total_levels // 2
         sell_count = total_levels - buy_count
 
         levels = []
-
-        buy_step = (current_price - range_result.lower) / max(buy_count, 1)
-        for i in range(buy_count):
-            price = current_price - buy_step * (i + 1)
-            if price < range_result.lower:
-                price = range_result.lower
+        buy_span = current_price - range_result.lower
+        buy_weights = self._weighted_positions(buy_count)
+        for i, w in enumerate(buy_weights):
+            price = current_price - buy_span * w
+            price = max(price, range_result.lower)
+            if i > 0 and levels:
+                prev = levels[-1].price
+                if abs(price - prev) < min_fee_spacing:
+                    continue
             levels.append(GridLevel(
                 price=round(price, 2),
                 side="buy",
@@ -115,11 +135,15 @@ class GridEngine:
                 index=i,
             ))
 
-        sell_step = (range_result.upper - current_price) / max(sell_count, 1)
-        for i in range(sell_count):
-            price = current_price + sell_step * (i + 1)
-            if price > range_result.upper:
-                price = range_result.upper
+        sell_span = range_result.upper - current_price
+        sell_weights = self._weighted_positions(sell_count)
+        for i, w in enumerate(sell_weights):
+            price = current_price + sell_span * w
+            price = min(price, range_result.upper)
+            if i > 0 and levels:
+                prev = levels[-1].price
+                if abs(price - prev) < min_fee_spacing:
+                    continue
             levels.append(GridLevel(
                 price=round(price, 2),
                 side="sell",

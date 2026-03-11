@@ -96,7 +96,7 @@ class RiskManager:
 
     def calculate_position_size(self, balance: float, price: float,
                                   volatility: float | None = None) -> float:
-        """Dynamic position sizing based on Kelly + volatility + balance."""
+        """Dynamic position sizing based on Kelly + volatility + drawdown scaling."""
         kelly = self.calculate_kelly_fraction()
         base_amount = (balance * kelly) / price
 
@@ -106,6 +106,13 @@ class RiskManager:
             vol_scalar = max(0.3, min(vol_scalar, 2.0))
             base_amount *= vol_scalar
             logger.debug("Volatility scaling: vol=%.4f, scalar=%.2f", volatility, vol_scalar)
+
+        dd_pct = self.state.current_drawdown
+        dd_limit = self.config.max_drawdown_percent
+        if dd_pct > dd_limit * 0.5:
+            dd_scalar = max(0.2, 1.0 - (dd_pct - dd_limit * 0.5) / (dd_limit * 0.5))
+            base_amount *= dd_scalar
+            logger.debug("Drawdown scaling: dd=%.2f%%, scalar=%.2f", dd_pct, dd_scalar)
 
         max_amount = (balance * self.config.max_position_percent / 100) / price
         amount = min(base_amount, max_amount)

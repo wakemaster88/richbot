@@ -32,6 +32,8 @@ class ManagedOrder:
 class OrderManager:
     """Manages order lifecycle: placement, tracking, fills, and trailing stops."""
 
+    FEE_RATE = 0.001  # 0.1% default; overridden from exchange if available
+
     def __init__(self, exchange: Exchange, grid_engine: GridEngine,
                  risk_manager: RiskManager, config: BotConfig):
         self.exchange = exchange
@@ -40,7 +42,7 @@ class OrderManager:
         self.config = config
         self.orders: dict[str, ManagedOrder] = {}
         self._fill_callbacks: list = []
-        self._pair_positions: dict[str, float] = {}
+        self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
 
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
@@ -163,13 +165,20 @@ class OrderManager:
         return managed
 
     def _calculate_pnl(self, order: ManagedOrder) -> float:
-        """Calculate PnL for a filled grid order.
-        Grid profit = spread between buy and sell levels."""
-        spacing_value = order.price * self.config.grid.spacing_percent / 100
-        if order.side == "sell":
-            return spacing_value * order.amount
-        else:
-            return -spacing_value * order.amount * 0.1
+        """Calculate realized PnL for a filled grid order.
+        Buy fills record cost; sell fills realize the round-trip profit minus fees."""
+        fee = order.fill_price * order.amount * self.FEE_RATE
+        idx = order.grid_level.index
+
+        if order.side == "buy":
+            self._round_trips[idx] = order.fill_price
+            return -fee
+
+        buy_price = self._round_trips.pop(idx, None)
+        if buy_price is not None:
+            gross = (order.fill_price - buy_price) * order.amount
+            return gross - 2 * fee
+        return -fee
 
     def check_trailing_stops(self, current_price: float) -> list[str]:
         """Check trailing stops and return triggered level IDs."""

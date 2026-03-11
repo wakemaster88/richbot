@@ -66,7 +66,7 @@ class PairBot:
             side=managed_order.side,
             price=managed_order.fill_price,
             amount=managed_order.amount,
-            fee=managed_order.fill_price * managed_order.amount * 0.001,
+            fee=managed_order.fill_price * managed_order.amount * OrderManager.FEE_RATE,
             pnl=managed_order.pnl,
             grid_level=managed_order.grid_level.price,
             order_id=managed_order.order_id,
@@ -129,6 +129,15 @@ class PairBot:
         triggered = self.order_mgr.check_trailing_stops(price)
         if triggered:
             logger.info("%s: %d trailing stops triggered", self.pair, len(triggered))
+            for level_id in triggered:
+                for oid, order in list(self.order_mgr.orders.items()):
+                    if order.status == "open" and order.grid_level.level_id == level_id:
+                        try:
+                            await self.exchange.async_cancel_order(oid, self.pair)
+                            order.status = "cancelled"
+                            logger.info("%s: Cancelled order %s (trailing stop)", self.pair, oid[:8])
+                        except Exception as e:
+                            logger.warning("Cancel on trailing stop failed: %s", e)
 
         if self.current_range:
             breakout = detect_range_breakout(price, self.current_range)
@@ -139,10 +148,20 @@ class PairBot:
                 new_range = shift_range(self.current_range, breakout)
                 self.current_range = new_range
 
-                vol = self.risk.calculate_volatility(
-                    [self.current_price] * 20
-                )
-                self.grid.trail_grid(breakout, price, new_range)
+                try:
+                    ohlcv = self.exchange.fetch_ohlcv(
+                        self.pair, timeframe=self.config.atr.timeframe, limit=50
+                    )
+                    closes = [c[4] for c in ohlcv]
+                    vol = self.risk.calculate_volatility(closes)
+                except Exception:
+                    vol = 0.02
+
+                balance = self.exchange.fetch_balance()
+                usdt = balance.get("USDT", {}).get("free", 10000)
+                dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
+
+                self.grid.trail_grid(breakout, price, new_range, dynamic_amount)
                 await self.order_mgr.place_grid_orders(self.pair)
 
                 await self.telegram.alert_range_shift(
@@ -292,6 +311,7 @@ class MultiPairBot:
             asyncio.create_task(self._ml_loop()),
             asyncio.create_task(self._equity_loop()),
             asyncio.create_task(self._daily_report_loop()),
+            asyncio.create_task(self._range_refresh_loop()),
         ]
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
@@ -312,6 +332,7 @@ class MultiPairBot:
             asyncio.create_task(self._ml_loop()),
             asyncio.create_task(self._equity_loop()),
             asyncio.create_task(self._daily_report_loop()),
+            asyncio.create_task(self._range_refresh_loop()),
         ]
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
@@ -321,6 +342,43 @@ class MultiPairBot:
         finally:
             for t in tasks:
                 t.cancel()
+
+    async def _range_refresh_loop(self):
+        """Recompute range with fresh OHLCV + ML every 2 hours."""
+        while self._running:
+            await asyncio.sleep(7200)
+            for pair, bot in self.pair_bots.items():
+                try:
+                    fetch_limit = self.config.pi.ohlcv_fetch_limit if self.config.is_pi else 200
+                    ohlcv = self.exchange.fetch_ohlcv(pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
+                    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                    ticker = self.exchange.fetch_ticker(pair)
+                    price = ticker["last"]
+
+                    new_range = compute_dynamic_range(
+                        df, price, self.config.atr,
+                        self.config.grid.range_multiplier,
+                        bot.ml, self.config.ml,
+                    )
+
+                    if new_range and bot.current_range:
+                        drift = abs(new_range.lower - bot.current_range.lower) / bot.current_range.spread
+                        if drift > 0.15:
+                            logger.info("%s: Range refresh — drift %.1f%%, recalculating grid", pair, drift * 100)
+                            await bot.order_mgr.cancel_all(pair)
+                            bot.current_range = new_range
+
+                            vol = self.risk.calculate_volatility(df["close"].values)
+                            balance = self.exchange.fetch_balance()
+                            usdt = balance.get("USDT", {}).get("free", 10000)
+                            dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
+
+                            bot.grid.calculate_grid(new_range, price, dynamic_amount)
+                            await bot.order_mgr.place_grid_orders(pair)
+                        else:
+                            logger.debug("%s: Range refresh — drift %.1f%%, keeping current grid", pair, drift * 100)
+                except Exception as e:
+                    logger.error("Range refresh failed for %s: %s", pair, e)
 
     async def _poll_loop(self):
         while self._running:

@@ -221,7 +221,8 @@ class PerformanceTracker:
         if stats.start_equity == 0 or len(stats.equity_history) < 2:
             return 0.0
 
-        total_return = (stats.current_equity - stats.start_equity) / stats.start_equity
+        net_equity = stats.current_equity - stats.fees_paid
+        total_return = (net_equity - stats.start_equity) / stats.start_equity
         first_ts = stats.equity_history[0][0]
         elapsed_days = (time.time() - first_ts) / 86400
         if elapsed_days < 1:
