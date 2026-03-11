@@ -585,6 +585,7 @@ export default function Dashboard() {
   const [commands, setCommands] = useState<CommandRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
+  const [latestCommit, setLatestCommit] = useState<string | null>(null);
 
   const demoEquity = useMemo(() => generateDemoEquity(), []);
   const demoPnl = useMemo(() => generateDemoPnl(), []);
@@ -619,6 +620,13 @@ export default function Dashboard() {
     const iv = setInterval(refresh, 5000);
     return () => clearInterval(iv);
   }, [refresh]);
+
+  useEffect(() => {
+    fetch("https://api.github.com/repos/wakemaster88/richbot/commits/main", { cache: "no-store" })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.sha) setLatestCommit(d.sha.slice(0, 7)); })
+      .catch(() => {});
+  }, []);
 
   const handleCommand = async (type: string) => {
     if (isDemo) return;
@@ -685,7 +693,22 @@ export default function Dashboard() {
         <div className="flex items-center gap-2 text-[10px] text-[var(--text-quaternary)]">
           <span>{laufzeit(status.startedAt)}</span>
           <span className="w-px h-2.5 bg-[var(--border)]" />
-          <span>v{status.version}</span>
+          {(() => {
+            const piVer = status.version || "?";
+            const isHash = piVer.length >= 7 && piVer !== "2.0" && piVer !== "?";
+            const isUpToDate = isHash && latestCommit && piVer === latestCommit;
+            const isOutdated = isHash && latestCommit && piVer !== latestCommit;
+            return (
+              <span className="flex items-center gap-1">
+                {isUpToDate && <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--up)]" />}
+                {isOutdated && <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--warn)]" />}
+                <span style={{ color: isOutdated ? "var(--warn)" : undefined }}>
+                  {isHash ? piVer : `v${piVer}`}
+                </span>
+                {isOutdated && <span style={{ color: "var(--warn)" }}>(Update: {latestCommit})</span>}
+              </span>
+            );
+          })()}
         </div>
       </header>
 

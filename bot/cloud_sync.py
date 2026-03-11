@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 
@@ -124,6 +125,7 @@ class CloudSync:
         try:
             uptime = int(time.time() - self._start_time)
             mem = await asyncio.to_thread(self._get_system_info)
+            git_ver = mem.get("git_commit", "?")
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO heartbeats (id, bot_id, status, pairs, uptime, memory, metrics) "
@@ -133,14 +135,15 @@ class CloudSync:
                     json.dumps(mem), json.dumps(self._metrics),
                 )
                 await conn.execute(
-                    "INSERT INTO bot_statuses (id, bot_id, status, last_heartbeat, pairs, pair_statuses, started_at) "
-                    "VALUES ($1, $2, $3, NOW(), $4::jsonb, $5::jsonb, to_timestamp($6)) "
+                    "INSERT INTO bot_statuses (id, bot_id, status, last_heartbeat, pairs, pair_statuses, started_at, version) "
+                    "VALUES ($1, $2, $3, NOW(), $4::jsonb, $5::jsonb, to_timestamp($6), $7) "
                     "ON CONFLICT (bot_id) DO UPDATE SET "
                     "status=EXCLUDED.status, last_heartbeat=NOW(), "
-                    "pairs=EXCLUDED.pairs, pair_statuses=EXCLUDED.pair_statuses",
+                    "pairs=EXCLUDED.pairs, pair_statuses=EXCLUDED.pair_statuses, "
+                    "version=EXCLUDED.version",
                     _uid(), self.bot_id, self._status,
                     json.dumps(self._pairs), json.dumps(self._metrics),
-                    self._start_time,
+                    self._start_time, git_ver,
                 )
         except Exception as e:
             logger.warning("Heartbeat failed: %s", e)
@@ -330,6 +333,25 @@ class CloudSync:
             info["hostname"] = platform.node()
             info["arch"] = platform.machine()
             info["python"] = platform.python_version()
+        except Exception:
+            pass
+
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            if result.returncode == 0:
+                info["git_commit"] = result.stdout.strip()
+            result2 = subprocess.run(
+                ["git", "log", "-1", "--format=%ci"],
+                capture_output=True, text=True, timeout=5,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            if result2.returncode == 0:
+                info["git_date"] = result2.stdout.strip()
         except Exception:
             pass
 
