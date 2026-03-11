@@ -623,6 +623,7 @@ class MultiPairBot:
             await asyncio.sleep(interval)
 
     async def _equity_loop(self):
+        cycle = 0
         while self._running:
             await asyncio.gather(
                 *(bot.update_equity() for bot in self.pair_bots.values()),
@@ -630,11 +631,67 @@ class MultiPairBot:
             )
             self.tracker.flush()
 
+            cycle += 1
+            if cycle % 5 == 0:
+                await self._auto_adjust_grid()
+
             if self.cloud.connected:
                 metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
                 self.cloud.update_status("running", self.config.pairs, metrics)
 
             await asyncio.sleep(60)
+
+    async def _auto_adjust_grid(self):
+        """Adjust grid level count based on current balance — runs every ~5 minutes."""
+        for pair, bot in self.pair_bots.items():
+            try:
+                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+                quote_bal = balance.get(bot.quote, {})
+                base = pair.split("/")[0]
+                base_bal = balance.get(base, {})
+                total_equity = quote_bal.get("total", 0) + base_bal.get("total", 0) * (bot.current_price or 0)
+
+                if bot.current_price <= 0 or total_equity <= 0:
+                    continue
+
+                market = self.exchange._markets.get(pair, {})
+                min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
+                step_size = market.get("precision", {}).get("amount", 0.00001)
+
+                import math
+                min_amount = math.ceil((min_notional * 1.2) / bot.current_price / step_size) * step_size
+                cost_per_level = min_amount * bot.current_price
+                max_affordable = int((total_equity * 0.85) / cost_per_level) if cost_per_level > 0 else 4
+                optimal = max(4, min(max_affordable, 20))
+
+                current = len(bot.grid.state.levels)
+                configured = self.config.grid.grid_count
+
+                if optimal != configured and abs(optimal - configured) >= 2:
+                    old = configured
+                    self.config.grid.grid_count = optimal
+                    self.config.grid.amount_per_order = min_amount
+
+                    bot.grid = GridEngine(
+                        grid_count=optimal,
+                        spacing_percent=self.config.grid.spacing_percent,
+                        amount_per_order=min_amount,
+                        infinity_mode=self.config.grid.infinity_mode,
+                        trail_trigger_percent=self.config.grid.trail_trigger_percent,
+                    )
+                    bot.order_mgr.grid = bot.grid
+
+                    if bot.current_range and bot.current_price:
+                        await bot.order_mgr.cancel_all(pair)
+                        bot.grid.calculate_grid(bot.current_range, bot.current_price, min_amount)
+                        await bot.order_mgr.place_grid_orders(pair)
+
+                    logger.info(
+                        "%s Auto-Grid: %d → %d Level (Kapital: %.2f %s, %.8f BTC/Order)",
+                        pair, old, optimal, total_equity, bot.quote, min_amount,
+                    )
+            except Exception as e:
+                logger.warning("Auto-grid adjust failed for %s: %s", pair, e)
 
     async def _daily_report_loop(self):
         while self._running:

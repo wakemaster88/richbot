@@ -719,9 +719,37 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
   );
 }
 
-/* ---- Grid Capital Info ---- */
+/* ---- Smart Grid ---- */
 
-function GridKapitalInfo({ gridCount, amountPerOrder }: { gridCount: number; amountPerOrder: number }) {
+interface SmartGridResult {
+  gridCount: number;
+  amountPerOrder: number;
+  rangeMultiplier: number;
+  maxDrawdown: number;
+  trailingStop: number;
+  maxPosition: number;
+}
+
+function calcSmartGrid(equity: number, price: number): SmartGridResult {
+  const minNotional = 5.0;
+  const minAmount = Math.ceil((minNotional * 1.2) / price * 100000) / 100000;
+  const costPerLevel = minAmount * price;
+  const reserve = 0.85;
+  const maxLevels = Math.floor((equity * reserve) / costPerLevel);
+  const gridCount = Math.max(4, Math.min(maxLevels, 20));
+
+  const rangeMultiplier = gridCount <= 6 ? 1.5 : gridCount <= 10 ? 1.2 : 1.0;
+  const maxDrawdown = equity < 50 ? 15 : equity < 200 ? 12 : 10;
+  const trailingStop = equity < 50 ? 3 : equity < 200 ? 2.5 : 2;
+  const maxPosition = equity < 100 ? 50 : 30;
+
+  return { gridCount, amountPerOrder: minAmount, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
+}
+
+function SmartGridPanel({ gridCount, amountPerOrder, onApply }: {
+  gridCount: number; amountPerOrder: number;
+  onApply: (result: SmartGridResult) => void;
+}) {
   const [price, setPrice] = useState<number | null>(null);
   const [equity, setEquity] = useState<number | null>(null);
 
@@ -743,60 +771,104 @@ function GridKapitalInfo({ gridCount, amountPerOrder }: { gridCount: number; amo
 
   if (!price) return null;
 
-  const costPerLevel = amountPerOrder * price;
   const minNotional = 5.0;
-  const effectiveCost = Math.max(costPerLevel, minNotional * 1.15);
-
+  const minAmount = Math.ceil((minNotional * 1.2) / price * 100000) / 100000;
+  const effectiveCost = minAmount * price;
   const stufen = [4, 6, 8, 10, 12, 16, 20];
   const fmt = (n: number) => n.toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const maxAffordable = equity ? Math.floor((equity * 0.85) / effectiveCost) : null;
+  const smart = equity ? calcSmartGrid(equity, price) : null;
 
-  const maxAffordable = equity ? Math.floor(equity / effectiveCost) : null;
+  const handleApplySmart = () => {
+    if (!smart) return;
+    onApply(smart);
+  };
+
+  const handleSelectLevel = (n: number) => {
+    if (!equity || !price) return;
+    const result = calcSmartGrid(equity, price);
+    result.gridCount = n;
+    if (n > 10) result.rangeMultiplier = 1.0;
+    else if (n > 6) result.rangeMultiplier = 1.2;
+    else result.rangeMultiplier = 1.5;
+    onApply(result);
+  };
 
   return (
     <div className="mt-4 rounded-xl p-3.5 border border-[var(--border-subtle)]" style={{ background: "var(--bg-secondary)" }}>
-      <div className="flex items-center gap-2 mb-2.5">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />
-        </svg>
-        <span className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-semibold">Kapital pro Grid-Level</span>
+      {/* Header + Smart Button */}
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />
+          </svg>
+          <span className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-semibold">Kapital pro Grid-Level</span>
+        </div>
+        {smart && (
+          <button onClick={handleApplySmart}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all active:scale-95"
+            style={{ background: "var(--accent-bg)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 20%, transparent)" }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a7 7 0 017 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 01-2 2h-4a2 2 0 01-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 017-7z"/>
+              <path d="M10 21h4"/>
+            </svg>
+            Smart Grid
+          </button>
+        )}
       </div>
 
+      {/* Status */}
       {equity !== null && maxAffordable !== null && (
         <div className="mb-3 px-3 py-2 rounded-lg text-[11px] font-medium" style={{
-          background: maxAffordable >= gridCount ? "var(--up-bg)" : "var(--warn-bg)",
-          color: maxAffordable >= gridCount ? "var(--up)" : "var(--warn)",
+          background: (maxAffordable >= gridCount) ? "var(--up-bg)" : "var(--warn-bg)",
+          color: (maxAffordable >= gridCount) ? "var(--up)" : "var(--warn)",
         }}>
-          {maxAffordable >= gridCount
+          {(maxAffordable >= gridCount)
             ? `Dein Kapital (${fmt(equity)} USDC) reicht fuer ${gridCount} Level`
             : `Dein Kapital (${fmt(equity)} USDC) reicht fuer max. ${Math.max(2, maxAffordable)} Level — ${gridCount} konfiguriert`
           }
         </div>
       )}
 
+      {/* Smart Preview */}
+      {smart && smart.gridCount !== gridCount && (
+        <div className="mb-3 px-3 py-2 rounded-lg text-[11px] border" style={{
+          background: "var(--accent-bg)", color: "var(--accent)",
+          borderColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
+        }}>
+          Smart-Empfehlung: <strong>{smart.gridCount} Level</strong>, {smart.amountPerOrder} BTC/Order, Range ×{smart.rangeMultiplier}
+        </div>
+      )}
+
+      {/* Level Grid */}
       <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
         {stufen.map((n) => {
           const needed = Math.ceil(n * effectiveCost);
-          const affordable = equity !== null && equity >= needed;
+          const affordable = equity !== null && (equity * 0.85) >= needed;
           const isCurrent = n === gridCount;
+          const isSmart = smart !== null && n === smart.gridCount && n !== gridCount;
           return (
-            <div key={n} className="text-center rounded-lg px-1.5 py-2 transition-all" style={{
-              background: isCurrent ? "var(--accent-bg)" : "var(--bg-primary)",
-              border: `1px solid ${isCurrent ? "var(--accent)" : "var(--border-subtle)"}`,
-              opacity: affordable === false ? 0.4 : 1,
-            }}>
-              <p className="text-[11px] font-bold font-mono" style={{ color: isCurrent ? "var(--accent)" : "var(--text-primary)" }}>{n}</p>
+            <button key={n} onClick={() => affordable && handleSelectLevel(n)} disabled={!affordable}
+              className="text-center rounded-lg px-1.5 py-2 transition-all disabled:cursor-not-allowed hover:enabled:scale-105 active:enabled:scale-95"
+              style={{
+                background: isCurrent ? "var(--accent-bg)" : isSmart ? "color-mix(in srgb, var(--up) 8%, transparent)" : "var(--bg-primary)",
+                border: `1.5px solid ${isCurrent ? "var(--accent)" : isSmart ? "var(--up)" : "var(--border-subtle)"}`,
+                opacity: !affordable ? 0.35 : 1,
+              }}>
+              <p className="text-[11px] font-bold font-mono" style={{ color: isCurrent ? "var(--accent)" : isSmart ? "var(--up)" : "var(--text-primary)" }}>{n}</p>
               <p className="text-[8px] text-[var(--text-quaternary)]">Level</p>
-              <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: affordable ? "var(--up)" : affordable === false ? "var(--down)" : "var(--text-tertiary)" }}>
+              <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: affordable ? "var(--up)" : "var(--down)" }}>
                 {fmt(needed)}
               </p>
               <p className="text-[7px] text-[var(--text-quaternary)]">USDC</p>
-            </div>
+              {isSmart && <p className="text-[7px] font-bold mt-0.5" style={{ color: "var(--up)" }}>SMART</p>}
+            </button>
           );
         })}
       </div>
 
       <p className="text-[9px] text-[var(--text-quaternary)] mt-2.5">
-        Berechnung: {amountPerOrder} BTC × {fmt(price)} USDC × Anzahl Level. Gruen = mit deinem Kapital moeglich.
+        Klicke auf ein Level um es direkt zu uebernehmen. Smart Grid optimiert alle Einstellungen automatisch.
       </p>
     </div>
   );
@@ -1257,7 +1329,18 @@ export default function SettingsPage() {
             <Zahl label="Trail-Schwelle %" value={config.grid?.trail_trigger_percent} onChange={(v) => update("grid.trail_trigger_percent", v)} step={0.1} min={0.5} max={10} hint="Ausbruch-Schwelle fur Grid-Verschiebung" />
           </div>
           <Schalter label="Infinity-Modus" value={config.grid?.infinity_mode} onChange={(v) => update("grid.infinity_mode", v)} hint="Grid verschiebt sich bei Ausbruch statt zu stoppen" />
-          <GridKapitalInfo gridCount={config.grid?.grid_count || 4} amountPerOrder={config.grid?.amount_per_order || 0.0001} />
+          <SmartGridPanel
+            gridCount={config.grid?.grid_count || 4}
+            amountPerOrder={config.grid?.amount_per_order || 0.0001}
+            onApply={(r) => {
+              update("grid.grid_count", r.gridCount);
+              update("grid.amount_per_order", r.amountPerOrder);
+              update("grid.range_multiplier", r.rangeMultiplier);
+              update("risk.max_drawdown_percent", r.maxDrawdown);
+              update("risk.trailing_stop_percent", r.trailingStop);
+              update("risk.max_position_percent", r.maxPosition);
+            }}
+          />
         </Sektion>
 
         {/* ATR */}
