@@ -3,7 +3,7 @@
     "name": "binance",
     "api_key": "",
     "api_secret": "",
-    "sandbox": true,
+    "sandbox": false,
     "rate_limit": true
   },
   "pairs": ["BTC/USDT"],

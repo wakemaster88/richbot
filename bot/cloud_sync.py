@@ -83,6 +83,8 @@ class CloudSync:
                 )
                 for row in rows:
                     k, v = row["key"], row["value"]
+                    if v:
+                        v = v.strip()
                     if v and not os.environ.get(k):
                         os.environ[k] = v
                         loaded[k] = "***"

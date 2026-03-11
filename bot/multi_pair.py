@@ -266,11 +266,23 @@ class MultiPairBot:
         await self.cloud.fetch_env()
 
         import os
-        from bot.config import ExchangeConfig
-        self.config.exchange.api_key = os.environ.get("BINANCE_API_KEY", self.config.exchange.api_key)
-        self.config.exchange.api_secret = os.environ.get("BINANCE_SECRET", self.config.exchange.api_secret)
-        self.config.telegram.bot_token = os.environ.get("TELEGRAM_TOKEN", self.config.telegram.bot_token)
-        self.config.telegram.chat_id = os.environ.get("TELEGRAM_CHAT_ID", self.config.telegram.chat_id)
+        api_key = os.environ.get("BINANCE_API_KEY", "").strip()
+        api_secret = os.environ.get("BINANCE_SECRET", "").strip()
+        tg_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+        tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+        if api_key:
+            self.config.exchange.api_key = api_key
+        if api_secret:
+            self.config.exchange.api_secret = api_secret
+        if api_key and api_secret:
+            self.config.exchange.sandbox = False
+            logger.info("Real API keys loaded — sandbox disabled")
+        if tg_token:
+            self.config.telegram.bot_token = tg_token
+        if tg_chat:
+            self.config.telegram.chat_id = tg_chat
+
         self.exchange = Exchange(self.config.exchange)
         self.telegram = TelegramNotifier(self.config.telegram)
 
