@@ -28,7 +28,7 @@ class ExchangeConfig:
 class GridConfig:
     grid_count: int = 20
     spacing_percent: float = 0.5
-    amount_per_order: float = 0.001
+    amount_per_order: float = 0.0001
     range_multiplier: float = 1.0
     infinity_mode: bool = True
     trail_trigger_percent: float = 1.5

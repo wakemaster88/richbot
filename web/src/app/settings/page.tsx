@@ -90,7 +90,7 @@ const DEFAULTS: BotConfigData = {
   grid: {
     grid_count: 20,
     spacing_percent: 0.5,
-    amount_per_order: 0.001,
+    amount_per_order: 0.0001,
     range_multiplier: 1.0,
     infinity_mode: true,
     trail_trigger_percent: 1.5,
