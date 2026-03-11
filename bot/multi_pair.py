@@ -506,9 +506,11 @@ class MultiPairBot:
 
         self._running = True
 
-        if self.config.websocket.enabled:
+        if self.config.websocket.enabled and not self.config.is_pi:
             await self._run_websocket()
         else:
+            if self.config.is_pi and self.config.websocket.enabled:
+                logger.info("WebSocket deaktiviert auf Pi (Speicherschutz) — nutze Polling")
             await self._run_polling()
 
     async def _run_websocket(self):
