@@ -20,6 +20,7 @@ interface PiSystem {
   arch?: string;
   python?: string;
   rss_kb?: number;
+  public_ip?: string;
 }
 
 interface PiStatus {
@@ -571,6 +572,35 @@ function RaspberryPiSektion() {
 
         {isOnline && sys ? (
           <>
+            {/* Public IP Banner */}
+            {sys.public_ip && (
+              <div className="flex items-center gap-3 p-3 mb-5 rounded-lg border"
+                style={{ background: "var(--accent-bg)", borderColor: "var(--accent)20" }}>
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                  style={{ background: "var(--accent)15" }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] uppercase tracking-wider text-[var(--text-tertiary)] mb-0.5">
+                    Oeffentliche IP — fuer Binance API Whitelist
+                  </p>
+                  <p className="text-sm font-mono font-bold text-[var(--text-primary)] select-all">
+                    {sys.public_ip}
+                  </p>
+                </div>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(sys.public_ip!); }}
+                  className="px-3 py-1.5 text-[11px] font-semibold rounded-md transition-colors shrink-0"
+                  style={{ background: "var(--accent)", color: "var(--bg-primary)" }}
+                  title="IP kopieren"
+                >
+                  Kopieren
+                </button>
+              </div>
+            )}
+
             {/* Quick Stats */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
               <PiStatKarte
