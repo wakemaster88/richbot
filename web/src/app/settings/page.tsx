@@ -140,13 +140,25 @@ function Zahl({ label, value, onChange, step, min, max, hint }: {
   label: string; value: number | undefined; onChange: (v: number) => void;
   step?: number; min?: number; max?: number; hint?: string;
 }) {
+  const [local, setLocal] = useState(value?.toString() ?? "");
+  useEffect(() => { setLocal(value?.toString() ?? ""); }, [value]);
+
   return (
     <div className="space-y-1.5">
       <label className="block text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium">{label}</label>
       <input
         type="number"
-        value={value ?? ""}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        value={local}
+        onChange={(e) => {
+          setLocal(e.target.value);
+          const v = parseFloat(e.target.value);
+          if (!isNaN(v)) onChange(v);
+        }}
+        onBlur={() => {
+          const v = parseFloat(local);
+          if (!isNaN(v)) { onChange(v); setLocal(v.toString()); }
+          else if (value !== undefined) setLocal(value.toString());
+        }}
         step={step || 1}
         min={min}
         max={max}
@@ -907,7 +919,7 @@ export default function SettingsPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Zahl label="Anzahl Grid-Level" value={config.grid?.grid_count} onChange={(v) => update("grid.grid_count", v)} min={4} max={100} hint="Mehr Level = engeres Grid, mehr Trades" />
             <Zahl label="Abstand %" value={config.grid?.spacing_percent} onChange={(v) => update("grid.spacing_percent", v)} step={0.1} min={0.1} max={5} hint="Prozent-Abstand zwischen den Leveln" />
-            <Zahl label="Betrag pro Order" value={config.grid?.amount_per_order} onChange={(v) => update("grid.amount_per_order", v)} step={0.0001} min={0.0001} hint="Basis-Ordergrosse in Coin" />
+            <Zahl label="Betrag pro Order (BTC)" value={config.grid?.amount_per_order} onChange={(v) => update("grid.amount_per_order", v)} step={0.00001} min={0.00001} hint="Menge in BTC pro Grid-Order (z.B. 0.0001 = ~$7 bei $70k)" />
             <Zahl label="Range-Multiplikator" value={config.grid?.range_multiplier} onChange={(v) => update("grid.range_multiplier", v)} step={0.1} min={0.5} max={5} />
             <Zahl label="Trail-Schwelle %" value={config.grid?.trail_trigger_percent} onChange={(v) => update("grid.trail_trigger_percent", v)} step={0.1} min={0.5} max={10} hint="Ausbruch-Schwelle fur Grid-Verschiebung" />
           </div>
