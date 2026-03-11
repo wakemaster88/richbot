@@ -290,6 +290,56 @@ class MultiPairBot:
         self._register_cloud_commands()
         await self.cloud.sync_config(self.config.to_dict())
 
+        # Validate exchange credentials before starting trading loops
+        exchange_ok = await self._test_exchange()
+        if not exchange_ok:
+            await self._wait_for_valid_credentials()
+            return
+
+        await self._start_trading()
+
+    async def _test_exchange(self) -> bool:
+        """Test exchange connectivity with a simple API call."""
+        try:
+            await self.exchange.async_fetch_ticker(self.config.pairs[0])
+            logger.info("Exchange connection OK")
+            return True
+        except Exception as e:
+            err = str(e)
+            if "Api-Key" in err or "apiKey" in err or "-2008" in err or "-2014" in err or "credential" in err.lower():
+                logger.error("UNGUELTIGE API-KEYS: %s", e)
+                logger.error("Bitte gueltige Binance API-Keys im Dashboard unter Einstellungen > Secrets eintragen.")
+            else:
+                logger.error("Exchange-Verbindung fehlgeschlagen: %s", e)
+            return False
+
+    async def _wait_for_valid_credentials(self):
+        """Stay alive with cloud sync only, waiting for valid API keys."""
+        logger.warning("Bot im Standby — warte auf gueltige API-Keys aus der Datenbank...")
+        self.cloud.update_status("waiting_credentials", self.config.pairs, {})
+        await self.cloud.send_heartbeat()
+        self._running = True
+
+        while self._running:
+            await asyncio.sleep(30)
+            await self.cloud.fetch_env(force=True)
+
+            import os
+            new_key = os.environ.get("BINANCE_API_KEY", "").strip()
+            new_secret = os.environ.get("BINANCE_SECRET", "").strip()
+            if new_key and new_secret:
+                self.config.exchange.api_key = new_key
+                self.config.exchange.api_secret = new_secret
+                self.config.exchange.sandbox = False
+                self.exchange = Exchange(self.config.exchange)
+                if await self._test_exchange():
+                    logger.info("Gueltige API-Keys erkannt — starte Trading...")
+                    await self._start_trading()
+                    return
+            await self.cloud.send_heartbeat()
+
+    async def _start_trading(self):
+        """Initialize pairs and start trading loops."""
         for pair in self.config.pairs:
             ml = None
             if self.config.ml.enabled:

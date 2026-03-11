@@ -69,7 +69,7 @@ class CloudSync:
         except Exception as e:
             logger.error("Cloud sync start failed: %s", e)
 
-    async def fetch_env(self) -> dict[str, str]:
+    async def fetch_env(self, force: bool = False) -> dict[str, str]:
         """Fetch secrets from Neon and inject into os.environ. Returns loaded keys."""
         if not self._pool:
             return {}
@@ -85,7 +85,7 @@ class CloudSync:
                     k, v = row["key"], row["value"]
                     if v:
                         v = v.strip()
-                    if v and not os.environ.get(k):
+                    if v and (force or not os.environ.get(k)):
                         os.environ[k] = v
                         loaded[k] = "***"
                 if loaded:
