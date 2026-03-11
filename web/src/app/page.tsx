@@ -36,6 +36,11 @@ interface BotEvent {
   id: string; timestamp: string; level: string; category: string;
   message: string; detail: Record<string, unknown> | null;
 }
+interface WalletEntry {
+  free: number; locked: number; total: number;
+  usdc_value: number; price?: number;
+}
+type WalletData = Record<string, WalletEntry> & { _total_usdc?: number };
 
 // -- Demo Data --
 
@@ -169,6 +174,64 @@ function MiniStat({ label, wert, farbe }: { label: string; wert: string; farbe?:
     <div className="card-inner px-3 py-2.5">
       <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-medium">{label}</p>
       <p className={`text-[15px] font-bold font-mono tracking-tight mt-0.5 ${farbe || "text-[var(--text-primary)]"}`}>{wert}</p>
+    </div>
+  );
+}
+
+const COIN_COLORS: Record<string, string> = {
+  USDC: "var(--up)", BTC: "#f7931a", SOL: "#9945ff", ETH: "#627eea",
+};
+
+function WalletUebersicht({ wallet }: { wallet: WalletData }) {
+  const total = wallet._total_usdc ?? 0;
+  const coins = Object.entries(wallet)
+    .filter(([k]) => !k.startsWith("_"))
+    .map(([symbol, entry]) => {
+      const e = entry as WalletEntry;
+      const pct = total > 0 ? (e.usdc_value / total) * 100 : 0;
+      return { symbol, ...e, pct };
+    })
+    .sort((a, b) => b.usdc_value - a.usdc_value);
+
+  return (
+    <div className="card p-4 sm:p-5 mb-3 fade-in">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Wallet</h3>
+        <span className="text-base font-bold font-mono">{fmt(total, 2)} <span className="text-[10px] text-[var(--text-tertiary)]">USDC</span></span>
+      </div>
+
+      {/* Balance bar */}
+      <div className="h-2 rounded-full overflow-hidden flex mb-3" style={{ background: "var(--bg-secondary)" }}>
+        {coins.map((c) => (
+          <div key={c.symbol} style={{ width: `${Math.max(c.pct, 1)}%`, background: COIN_COLORS[c.symbol] || "var(--text-tertiary)" }}
+            className="transition-all duration-500" />
+        ))}
+      </div>
+
+      {/* Coin rows */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        {coins.map((c) => (
+          <div key={c.symbol} className="flex items-center gap-2.5 px-3 py-2 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[9px] font-bold shrink-0"
+              style={{ background: `color-mix(in srgb, ${COIN_COLORS[c.symbol] || "var(--text-tertiary)"} 15%, transparent)`,
+                       color: COIN_COLORS[c.symbol] || "var(--text-tertiary)" }}>
+              {c.symbol}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline justify-between">
+                <span className="font-mono font-semibold text-xs">
+                  {c.symbol === "USDC" ? fmt(c.total, 2) : c.total < 0.01 ? c.total.toFixed(8) : fmt(c.total, 4)}
+                </span>
+                <span className="text-[10px] text-[var(--text-quaternary)] font-mono">{c.pct.toFixed(1)}%</span>
+              </div>
+              <div className="flex items-center justify-between text-[9px] text-[var(--text-quaternary)]">
+                <span>≈ {fmt(c.usdc_value, 2)} USDC</span>
+                {c.locked > 0 && <span className="text-[var(--warn)]">{c.symbol === "USDC" ? fmt(c.locked, 2) : c.locked.toFixed(6)} gesperrt</span>}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -739,11 +802,13 @@ export default function Dashboard() {
   };
 
   const status = botStatus || DEMO_STATUS;
-  const pairs = Object.entries((status.pairStatuses || {}) as Record<string, PairMetrics>);
+  const rawStatuses = (status.pairStatuses || {}) as Record<string, PairMetrics | WalletData>;
+  const walletData = (rawStatuses["__wallet__"] || null) as WalletData | null;
+  const pairs = Object.entries(rawStatuses).filter(([k]) => k !== "__wallet__") as [string, PairMetrics][];
   const quoteCcy = status.pairs?.[0]?.split("/")?.[1] || "USDC";
   const totalPnl = pairs.reduce((s, [, m]) => s + (m.total_pnl || 0), 0);
   const totalTrades = pairs.reduce((s, [, m]) => s + (m.trade_count || 0), 0);
-  const totalEquity = pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
+  const walletTotal = walletData?._total_usdc ?? pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
   const maxDd = Math.max(...pairs.map(([, m]) => m.max_drawdown_pct || 0), 0);
 
   const pnlData = useMemo(() => {
@@ -819,10 +884,13 @@ export default function Dashboard() {
       {/* Quick Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
         <MiniStat label="Gesamt-PnL" wert={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 4)}`} farbe={totalPnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} />
-        <MiniStat label={`Kapital (${quoteCcy})`} wert={fmt(totalEquity)} />
+        <MiniStat label="Portfolio" wert={`${fmt(walletTotal)} ${quoteCcy}`} />
         <MiniStat label="Trades" wert={totalTrades.toLocaleString("de-DE")} />
         <MiniStat label="Drawdown" wert={`${fmt(maxDd)}%`} farbe={maxDd > 5 ? "text-[var(--down)]" : "text-[var(--warn)]"} />
       </div>
+
+      {/* Wallet */}
+      {walletData && <WalletUebersicht wallet={walletData} />}
 
       {/* Pair Sections */}
       {pairs.length > 0 ? pairs.map(([p, m]) => (

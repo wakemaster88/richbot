@@ -697,9 +697,45 @@ class MultiPairBot:
 
             if self.cloud.connected:
                 metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
-                self.cloud.update_status("running", self.config.pairs, metrics)
+                wallet = await self._fetch_wallet()
+                self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
             await asyncio.sleep(60)
+
+    async def _fetch_wallet(self) -> dict:
+        """Fetch full wallet balances for dashboard display."""
+        try:
+            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+            wallet: dict = {}
+            total_usdc = 0.0
+
+            for pair, bot in self.pair_bots.items():
+                base = pair.split("/")[0]
+                quote = pair.split("/")[1]
+                price = bot.current_price or 0
+
+                if quote not in wallet:
+                    q = balance.get(quote, {})
+                    wallet[quote] = {
+                        "free": q.get("free", 0), "locked": q.get("used", 0),
+                        "total": q.get("total", 0), "usdc_value": q.get("total", 0),
+                    }
+                    total_usdc += q.get("total", 0)
+
+                b = balance.get(base, {})
+                b_total = b.get("total", 0)
+                wallet[base] = {
+                    "free": b.get("free", 0), "locked": b.get("used", 0),
+                    "total": b_total, "price": price,
+                    "usdc_value": b_total * price,
+                }
+                total_usdc += b_total * price
+
+            wallet["_total_usdc"] = total_usdc
+            return wallet
+        except Exception as e:
+            logger.debug("Wallet fetch failed: %s", e)
+            return {}
 
     @staticmethod
     def _score_grid(n: int, half_equity: float, price: float,

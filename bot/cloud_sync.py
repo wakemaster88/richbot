@@ -109,11 +109,14 @@ class CloudSync:
             self._pool = None
         logger.info("Cloud sync stopped")
 
-    def update_status(self, status: str, pairs: list[str], metrics: dict):
+    def update_status(self, status: str, pairs: list[str], metrics: dict,
+                       wallet: dict | None = None):
         """Called by MultiPairBot to push current state for next heartbeat."""
         self._status = status
         self._pairs = pairs
         self._metrics = metrics
+        if wallet is not None:
+            self._metrics["__wallet__"] = wallet
 
     def on_command(self, command_type: str, handler):
         """Register a handler for a command type (sync or async callable)."""
