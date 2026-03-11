@@ -35,7 +35,7 @@ class Exchange:
             "options": {
                 "defaultType": "spot",
                 "fetchMarkets": ["spot"],
-                "loadAllCurrencies": False,
+                "fetchCurrencies": False,
                 "warnOnFetchOpenOrdersWithoutSymbol": False,
             },
         }
@@ -44,6 +44,20 @@ class Exchange:
         if self.config.api_secret:
             params["secret"] = self.config.api_secret
         return params
+
+    async def preload_markets(self, symbols: list[str]):
+        """Load only specific markets to minimize memory on Pi."""
+        import json as _json
+        client = self.async_client
+        binance_syms = [s.replace("/", "") for s in symbols]
+        try:
+            await client.load_markets({
+                "symbols": _json.dumps(binance_syms),
+            })
+            logger.info("Markets loaded for %s (%d pairs)", symbols, len(client.markets))
+        except Exception as e:
+            logger.warning("Selective market load failed, trying full load: %s", e)
+            await client.load_markets()
 
     @property
     def sync(self) -> ccxt.Exchange:

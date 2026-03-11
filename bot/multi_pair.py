@@ -369,6 +369,8 @@ class MultiPairBot:
 
     async def _start_trading(self):
         """Initialize pairs and start trading loops."""
+        await self.exchange.preload_markets(self.config.pairs)
+
         for pair in self.config.pairs:
             ml = None
             if self.config.ml.enabled:
