@@ -84,13 +84,13 @@ interface BotConfigData {
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
-function deepMerge<T extends Record<string, unknown>>(defaults: T, override: Partial<T>): T {
+function deepMerge<T extends object>(defaults: T, override: Partial<T>): T {
   const result = { ...defaults };
   for (const key of Object.keys(override) as (keyof T)[]) {
     const ov = override[key];
     const dv = defaults[key];
     if (ov && typeof ov === "object" && !Array.isArray(ov) && dv && typeof dv === "object" && !Array.isArray(dv)) {
-      result[key] = deepMerge(dv as Record<string, unknown>, ov as Record<string, unknown>) as T[keyof T];
+      result[key] = deepMerge(dv as object, ov as object) as T[keyof T];
     } else if (ov !== undefined) {
       result[key] = ov as T[keyof T];
     }
