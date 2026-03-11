@@ -92,6 +92,18 @@ class PairBot:
         """Set up initial grid."""
         logger.info("Initializing pair bot for %s", self.pair)
 
+        try:
+            old_orders = await self.exchange.async_fetch_open_orders(self.pair)
+            if old_orders:
+                for o in old_orders:
+                    try:
+                        await self.exchange.async_cancel_order(o["id"], self.pair)
+                    except Exception:
+                        pass
+                logger.info("%s: %d alte offene Orders gecancelt", self.pair, len(old_orders))
+        except Exception as e:
+            logger.warning("Alte Orders pruefen fehlgeschlagen: %s", e)
+
         fetch_limit = self.config.pi.ohlcv_fetch_limit if self.config.is_pi else 200
         ohlcv = await self.exchange.async_fetch_ohlcv(self.pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -124,12 +136,15 @@ class PairBot:
 
         market = self.exchange._markets.get(self.pair, {})
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
-        min_amount_for_notional = (min_notional * 1.05) / self.current_price
-        if dynamic_amount * self.current_price < min_notional:
+        step_size = market.get("precision", {}).get("amount", 0.00001)
+        min_amount_for_notional = (min_notional * 1.15) / self.current_price
+        import math
+        min_amount_for_notional = math.ceil(min_amount_for_notional / step_size) * step_size
+        if dynamic_amount * self.current_price < min_notional * 1.1:
             dynamic_amount = min_amount_for_notional
             logger.warning(
-                "%s amount angepasst: %.8f → %.8f (min. Notional %.2f %s)",
-                self.pair, self.config.grid.amount_per_order, dynamic_amount, min_notional, self.quote,
+                "%s amount angepasst → %.8f BTC (≈%.2f %s) um Notional-Minimum %.2f zu erfuellen",
+                self.pair, dynamic_amount, dynamic_amount * self.current_price, self.quote, min_notional,
             )
 
         grid_count = self.config.grid.grid_count
@@ -329,6 +344,10 @@ class MultiPairBot:
         db_cfg = await self.cloud.fetch_config_update()
         if db_cfg:
             self._apply_config(db_cfg)
+            if self.config.grid.amount_per_order < 0.0001:
+                logger.warning("amount_per_order zu klein (%.8f), korrigiere auf 0.0001",
+                               self.config.grid.amount_per_order)
+                self.config.grid.amount_per_order = 0.0001
             logger.info("Dashboard-Config geladen und angewendet")
 
         import os
