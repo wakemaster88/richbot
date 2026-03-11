@@ -369,7 +369,13 @@ class MultiPairBot:
 
     async def _start_trading(self):
         """Initialize pairs and start trading loops."""
-        await self.exchange.preload_markets(self.config.pairs)
+        try:
+            await self.exchange.preload_markets(self.config.pairs)
+        except Exception as e:
+            logger.error("Markets laden fehlgeschlagen [%s]: %s", type(e).__name__, e)
+            logger.warning("Bot geht zurueck in Standby...")
+            await self._wait_for_valid_credentials()
+            return
 
         for pair in self.config.pairs:
             ml = None

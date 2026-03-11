@@ -46,18 +46,37 @@ class Exchange:
         return params
 
     async def preload_markets(self, symbols: list[str]):
-        """Load only specific markets to minimize memory on Pi."""
+        """Load only specific markets via direct HTTP to minimize memory."""
         import json as _json
+        import aiohttp
+
         client = self.async_client
         binance_syms = [s.replace("/", "") for s in symbols]
-        try:
-            await client.load_markets({
-                "symbols": _json.dumps(binance_syms),
-            })
-            logger.info("Markets loaded for %s (%d pairs)", symbols, len(client.markets))
-        except Exception as e:
-            logger.warning("Selective market load failed, trying full load: %s", e)
-            await client.load_markets()
+
+        if len(binance_syms) == 1:
+            qs = f"symbol={binance_syms[0]}"
+        else:
+            qs = f'symbols={_json.dumps(binance_syms)}'
+
+        url = f"https://api.binance.com/api/v3/exchangeInfo?{qs}"
+        logger.info("Loading markets for %s from %s", symbols, url)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                exchange_info = await resp.json()
+
+        parsed = []
+        for sym_data in exchange_info.get("symbols", []):
+            try:
+                parsed.append(client.parse_market(sym_data))
+            except Exception as e:
+                logger.warning("Failed to parse market %s: %s", sym_data.get("symbol"), e)
+
+        if parsed:
+            client.set_markets(parsed)
+            logger.info("Loaded %d markets: %s", len(parsed), [m["symbol"] for m in parsed])
+        else:
+            raise RuntimeError("No markets parsed — check symbol names")
 
     @property
     def sync(self) -> ccxt.Exchange:
