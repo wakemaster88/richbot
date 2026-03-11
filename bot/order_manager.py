@@ -43,6 +43,7 @@ class OrderManager:
         self.orders: dict[str, ManagedOrder] = {}
         self._fill_callbacks: list = []
         self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
+        self.last_fail_reason: str = ""
 
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
@@ -64,6 +65,7 @@ class OrderManager:
 
         levels = self.grid.get_levels_to_place()
         placed = []
+        self.last_fail_reason = ""
 
         for level in levels:
             try:
@@ -94,6 +96,7 @@ class OrderManager:
                             level.side, symbol, level.amount, level.price, order["id"])
 
             except Exception as e:
+                self.last_fail_reason = str(e)
                 logger.error("Failed to place %s order @ %.2f: %s", level.side, level.price, e)
 
         return placed

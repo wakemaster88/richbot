@@ -63,6 +63,7 @@ class PairBot:
         self.current_price: float = 0.0
         self.last_prediction: dict | None = None
         self._running = False
+        self._grid_issue: str = ""
 
         self.quote = pair.split("/")[1] if "/" in pair else "USDT"
         self.base = pair.split("/")[0] if "/" in pair else pair
@@ -184,9 +185,12 @@ class PairBot:
         self.grid.calculate_grid(self.current_range, self.current_price, dynamic_amount)
 
         try:
-            await self.order_mgr.place_grid_orders(self.pair)
+            placed = await self.order_mgr.place_grid_orders(self.pair)
+            if len(placed) < len(self.grid.state.levels):
+                self._grid_issue = self.order_mgr.last_fail_reason or "Balance zu niedrig"
         except Exception as e:
             logger.error("Failed to place initial orders for %s: %s", self.pair, e)
+            self._grid_issue = str(e)
 
         actual_levels = len(self.grid.state.levels)
         logger.info(
@@ -330,6 +334,7 @@ class PairBot:
             {"side": o.side, "price": o.price, "amount": o.amount, "id": o.order_id}
             for o in sorted(open_orders, key=lambda x: x.price)
         ]
+        unplaced = len(self.grid.get_levels_to_place())
         return {
             "pair": self.pair,
             "price": self.current_price,
@@ -339,6 +344,8 @@ class PairBot:
             "grid_configured": self.pair_grid_count,
             "active_orders": len(open_orders),
             "filled_orders": len(self.order_mgr.get_filled_orders(self.pair)),
+            "unplaced_orders": unplaced,
+            "grid_issue": self._grid_issue if unplaced > 0 else "",
             "open_orders": orders_list,
             "last_prediction": self.last_prediction,
             **self.tracker.get_summary(self.pair),
@@ -654,12 +661,17 @@ class MultiPairBot:
                     unplaced = bot.grid.get_levels_to_place()
                     if unplaced:
                         recovered = await bot.order_mgr.place_grid_orders(pair)
-                        if recovered and self.cloud.connected:
-                            asyncio.create_task(self.cloud.log_event(
-                                "grid", f"{len(recovered)} Order(s) nachplatziert",
-                                {"pair": pair, "count": len(recovered),
-                                 "orders": [{"side": o.side, "price": o.price} for o in recovered]},
-                            ))
+                        if recovered:
+                            bot._grid_issue = ""
+                            if self.cloud.connected:
+                                asyncio.create_task(self.cloud.log_event(
+                                    "grid", f"{len(recovered)} Order(s) nachplatziert",
+                                    {"pair": pair, "count": len(recovered),
+                                     "orders": [{"side": o.side, "price": o.price} for o in recovered]},
+                                ))
+                        else:
+                            reason = bot.order_mgr.last_fail_reason or "Unbekannt"
+                            bot._grid_issue = reason
 
                 except Exception as e:
                     logger.error("Poll error for %s: %s", pair, e)
