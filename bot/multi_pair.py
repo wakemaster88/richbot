@@ -300,37 +300,44 @@ class MultiPairBot:
         await self._start_trading()
 
     async def _test_exchange(self) -> bool:
-        """Test exchange connectivity with a lightweight API call (no market loading)."""
-        import hmac, hashlib, time as _time
-        try:
-            import aiohttp
-            api_key = self.config.exchange.api_key
-            api_secret = self.config.exchange.api_secret
-            if not api_key or not api_secret:
-                logger.error("UNGUELTIGE API-KEYS: Kein Key/Secret konfiguriert")
-                return False
+        """Test exchange connectivity with a lightweight API call (no threads needed)."""
+        import hmac, hashlib, time as _time, json as _json
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError
 
+        api_key = self.config.exchange.api_key
+        api_secret = self.config.exchange.api_secret
+        if not api_key or not api_secret:
+            logger.error("UNGUELTIGE API-KEYS: Kein Key/Secret konfiguriert")
+            return False
+
+        try:
             ts = int(_time.time() * 1000)
             query = f"timestamp={ts}"
             sig = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
             url = f"https://api.binance.com/api/v3/account?{query}&signature={sig}"
-            headers = {"X-MBX-APIKEY": api_key}
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    data = await resp.json()
-                    if resp.status == 200:
-                        logger.info("Binance API OK — Konto verifiziert")
-                        return True
+            req = Request(url, headers={"X-MBX-APIKEY": api_key})
+            resp = urlopen(req, timeout=10)
+            data = _json.loads(resp.read().decode())
+            logger.info("Binance API OK — Konto verifiziert")
+            return True
+        except URLError as e:
+            if hasattr(e, "read"):
+                try:
+                    data = _json.loads(e.read().decode())
                     code = data.get("code", "")
                     msg = data.get("msg", "")
-                    full = f"binance {{\"{code}\":\"{msg}\"}}"
+                    full = f"binance {{{code}: \"{msg}\"}}"
                     if code in (-2008, -2014, -2015):
                         logger.error("UNGUELTIGE API-KEYS: %s", full)
                         logger.error("Bitte gueltige Binance API-Keys im Dashboard unter Einstellungen > Secrets eintragen.")
                     else:
                         logger.error("Exchange-Verbindung fehlgeschlagen: %s", full)
                     return False
+                except Exception:
+                    pass
+            logger.error("Exchange-Test fehlgeschlagen [%s]: %s", type(e).__name__, e)
+            return False
         except Exception as e:
             logger.error("Exchange-Test fehlgeschlagen [%s]: %s", type(e).__name__, e or "(kein Detail)")
             return False

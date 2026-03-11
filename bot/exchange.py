@@ -48,7 +48,7 @@ class Exchange:
     async def preload_markets(self, symbols: list[str]):
         """Load only specific markets via direct HTTP to minimize memory."""
         import json as _json
-        import aiohttp
+        from urllib.request import urlopen
 
         client = self.async_client
         binance_syms = [s.replace("/", "") for s in symbols]
@@ -61,9 +61,8 @@ class Exchange:
         url = f"https://api.binance.com/api/v3/exchangeInfo?{qs}"
         logger.info("Loading markets for %s", symbols)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                exchange_info = await resp.json()
+        resp = urlopen(url, timeout=15)
+        exchange_info = _json.loads(resp.read().decode())
 
         parsed = []
         for sym_data in exchange_info.get("symbols", []):
