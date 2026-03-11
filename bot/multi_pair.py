@@ -264,6 +264,16 @@ class MultiPairBot:
 
         await self.cloud.start()
         await self.cloud.fetch_env()
+
+        import os
+        from bot.config import ExchangeConfig
+        self.config.exchange.api_key = os.environ.get("BINANCE_API_KEY", self.config.exchange.api_key)
+        self.config.exchange.api_secret = os.environ.get("BINANCE_SECRET", self.config.exchange.api_secret)
+        self.config.telegram.bot_token = os.environ.get("TELEGRAM_TOKEN", self.config.telegram.bot_token)
+        self.config.telegram.chat_id = os.environ.get("TELEGRAM_CHAT_ID", self.config.telegram.chat_id)
+        self.exchange = Exchange(self.config.exchange)
+        self.telegram = TelegramNotifier(self.config.telegram)
+
         self._register_cloud_commands()
         await self.cloud.sync_config(self.config.to_dict())
 

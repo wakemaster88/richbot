@@ -237,6 +237,14 @@ def run_dashboard(config):
 def main():
     args = parse_args()
 
+    try:
+        from dotenv import load_dotenv
+        env_path = Path(args.config).parent / ".env"
+        load_dotenv(env_path)
+        load_dotenv()  # also try cwd/.env
+    except ImportError:
+        pass
+
     from bot.config import load_config
     config = load_config(Path(args.config), use_best=args.use_best)
 
