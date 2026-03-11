@@ -10,6 +10,7 @@ const VALID_KEYS = [
   "BINANCE_SECRET",
   "TELEGRAM_TOKEN",
   "TELEGRAM_CHAT_ID",
+  "XAI_API_KEY",
 ];
 
 export async function GET() {

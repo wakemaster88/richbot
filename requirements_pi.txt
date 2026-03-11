@@ -21,3 +21,4 @@ python-dotenv>=1.0.0
 # Install aiohttp separately if ccxt[pro] fails on ARM64:
 aiohttp>=3.9.0
 asyncpg>=0.29.0
+openai>=1.12.0

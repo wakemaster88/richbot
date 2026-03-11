@@ -196,6 +196,9 @@ def _apply_env_overrides(cfg: BotConfig) -> BotConfig:
         "TELEGRAM_BOT_TOKEN": lambda v: setattr(cfg.telegram, "bot_token", v),
         "TELEGRAM_CHAT_ID": lambda v: setattr(cfg.telegram, "chat_id", v),
     }
+    env_map["BINANCE_API_KEY"] = lambda v: setattr(cfg.exchange, "api_key", v)
+    env_map["BINANCE_SECRET"] = lambda v: setattr(cfg.exchange, "api_secret", v)
+    env_map["TELEGRAM_TOKEN"] = lambda v: setattr(cfg.telegram, "bot_token", v)
     env_map["NEON_DATABASE_URL"] = lambda v: setattr(cfg.cloud, "database_url", v)
     env_map["CLOUD_BOT_ID"] = lambda v: setattr(cfg.cloud, "bot_id", v)
     env_map["CLOUD_ENABLED"] = lambda v: setattr(cfg.cloud, "enabled", v.lower() == "true")

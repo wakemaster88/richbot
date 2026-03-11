@@ -328,8 +328,9 @@ function formatUptime(seconds: number): string {
 const SECRET_FIELDS = [
   { key: "BINANCE_API_KEY", label: "Binance API-Key", hint: "Spot-Trading muss aktiviert sein", placeholder: "z.B. aB3d...xY9z" },
   { key: "BINANCE_SECRET", label: "Binance Secret", hint: "Geheimer Schlüssel zum API-Key", placeholder: "z.B. kL7m...pQ2r" },
-  { key: "TELEGRAM_TOKEN", label: "Telegram Bot-Token", hint: "Optional — für Benachrichtigungen", placeholder: "z.B. 123456:ABC-DEF..." },
-  { key: "TELEGRAM_CHAT_ID", label: "Telegram Chat-ID", hint: "Optional — deine Chat-ID für Alerts", placeholder: "z.B. 987654321" },
+  { key: "TELEGRAM_TOKEN", label: "Telegram Bot-Token", hint: "Für Benachrichtigungen und AI-Chat", placeholder: "z.B. 123456:ABC-DEF..." },
+  { key: "TELEGRAM_CHAT_ID", label: "Telegram Chat-ID", hint: "Deine Chat-ID für Alerts und Befehle", placeholder: "z.B. 987654321" },
+  { key: "XAI_API_KEY", label: "xAI API-Key (Grok)", hint: "Für KI-gestützte Telegram-Antworten und Analysen", placeholder: "xai-..." },
 ];
 
 function SecretsSektion() {
