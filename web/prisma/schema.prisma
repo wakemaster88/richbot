@@ -86,3 +86,14 @@ model BotConfig {
 
   @@map("bot_configs")
 }
+
+model BotSecret {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  key       String
+  value     String
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([botId, key])
+  @@map("bot_secrets")
+}

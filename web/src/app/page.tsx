@@ -11,7 +11,7 @@ import {
 interface BotStatus {
   id: string; botId: string; status: string; lastHeartbeat: string;
   pairs: string[]; pairStatuses: Record<string, PairMetrics>;
-  startedAt: string; version: string;
+  startedAt: string; version: string; dbConnected?: boolean;
 }
 interface PairMetrics {
   pair: string; price: number; range: string; range_source: string;
@@ -437,12 +437,11 @@ export default function Dashboard() {
       fetchJson<CommandRecord[]>("/api/commands?limit=20"),
     ]);
 
-    const hasData = s && s.id && s.status !== "unknown";
-    if (hasData) {
+    if (s?.dbConnected) {
       setBotStatus(s);
-      if (t) setTrades(t);
-      if (e) setEquity(e);
-      if (c) setCommands(c);
+      setTrades(t || []);
+      setEquity(e || []);
+      setCommands(c || []);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -474,7 +473,18 @@ export default function Dashboard() {
   const maxDd = Math.max(...pairs.map(([, m]) => m.max_drawdown_pct || 0), 0);
   const avgSharpe = pairs.length ? pairs.reduce((s, [, m]) => s + (m.sharpe_ratio || 0), 0) / pairs.length : 0;
   const avgReturn = pairs.length ? pairs.reduce((s, [, m]) => s + (m.annualized_return_pct || 0), 0) / pairs.length : 0;
-  const pnlData = isDemo ? demoPnl : [];
+  const pnlData = useMemo(() => {
+    if (isDemo) return demoPnl;
+    if (!trades.length) return [];
+    const buckets: Record<string, number> = {};
+    for (const t of trades) {
+      const h = new Date(t.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }).replace(/:\d{2}$/, ":00");
+      buckets[h] = (buckets[h] || 0) + (t.pnl || 0);
+    }
+    return Object.entries(buckets)
+      .map(([zeit, pnl]) => ({ zeit, pnl: parseFloat(pnl.toFixed(4)) }))
+      .sort((a, b) => a.zeit.localeCompare(b.zeit));
+  }, [isDemo, demoPnl, trades]);
 
   if (loading) {
     return (
@@ -492,7 +502,14 @@ export default function Dashboard() {
       {/* Demo Banner */}
       {isDemo && (
         <div className="mb-4 px-4 py-2.5 rounded-xl text-[11px] font-medium text-center" style={{ background: "var(--accent-bg)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 15%, transparent)" }}>
-          Demo-Modus — Verbinde eine Neon-Datenbank fur Live-Daten
+          Demo-Modus — Datenbank nicht erreichbar. Prufe die Umgebungsvariablen.
+        </div>
+      )}
+
+      {/* Waiting for Bot */}
+      {!isDemo && status.status === "waiting" && (
+        <div className="mb-4 px-4 py-2.5 rounded-xl text-[11px] font-medium text-center" style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
+          Datenbank verbunden — Warte auf Raspberry Pi. Starte den Bot, um Live-Daten zu sehen.
         </div>
       )}
 
@@ -527,7 +544,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
         <EquityChart data={equity} />
         {pnlData.length > 0 && <PnlChart data={pnlData} />}
-        {pnlData.length === 0 && <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">PnL-Chart erscheint mit Live-Daten</div>}
+        {pnlData.length === 0 && <div className="card p-5 flex items-center justify-center text-sm text-[var(--text-tertiary)]">PnL-Chart erscheint nach ersten Trades</div>}
       </div>
 
       {/* Trades + Controls */}

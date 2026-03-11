@@ -69,6 +69,29 @@ class CloudSync:
         except Exception as e:
             logger.error("Cloud sync start failed: %s", e)
 
+    async def fetch_env(self) -> dict[str, str]:
+        """Fetch secrets from Neon and inject into os.environ. Returns loaded keys."""
+        if not self._pool:
+            return {}
+        import os
+        loaded = {}
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT key, value FROM bot_secrets WHERE bot_id = $1",
+                    self.bot_id,
+                )
+                for row in rows:
+                    k, v = row["key"], row["value"]
+                    if v and not os.environ.get(k):
+                        os.environ[k] = v
+                        loaded[k] = "***"
+                if loaded:
+                    logger.info("Loaded %d secrets from cloud: %s", len(loaded), list(loaded.keys()))
+        except Exception as e:
+            logger.warning("Failed to fetch secrets: %s", e)
+        return loaded
+
     async def stop(self):
         self._running = False
         self._status = "stopped"
@@ -381,5 +404,14 @@ CREATE TABLE IF NOT EXISTS bot_configs (
     bot_id TEXT UNIQUE NOT NULL,
     config JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS bot_secrets (
+    id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(bot_id, key)
 );
 """

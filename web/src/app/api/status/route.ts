@@ -16,20 +16,24 @@ export async function GET() {
         {
           id: "",
           botId: BOT_ID,
-          status: "unknown",
+          status: "waiting",
           lastHeartbeat: new Date().toISOString(),
           pairs: [],
           pairStatuses: {},
           startedAt: new Date().toISOString(),
           version: "2.0",
+          dbConnected: true,
         },
         { status: 200 }
       );
     }
 
-    return NextResponse.json(status);
+    return NextResponse.json({ ...status, dbConnected: true });
   } catch (error) {
     console.error("Status fetch error:", error);
-    return NextResponse.json({ error: "Failed to fetch status" }, { status: 500 });
+    return NextResponse.json(
+      { dbConnected: false, status: "error", error: "Database not reachable" },
+      { status: 200 }
+    );
   }
 }

@@ -323,39 +323,155 @@ function formatUptime(seconds: number): string {
   return `${m}m`;
 }
 
+/* ---- Secrets Section ---- */
+
+const SECRET_FIELDS = [
+  { key: "BINANCE_API_KEY", label: "Binance API-Key", hint: "Spot-Trading muss aktiviert sein", placeholder: "z.B. aB3d...xY9z" },
+  { key: "BINANCE_SECRET", label: "Binance Secret", hint: "Geheimer Schlüssel zum API-Key", placeholder: "z.B. kL7m...pQ2r" },
+  { key: "TELEGRAM_TOKEN", label: "Telegram Bot-Token", hint: "Optional — für Benachrichtigungen", placeholder: "z.B. 123456:ABC-DEF..." },
+  { key: "TELEGRAM_CHAT_ID", label: "Telegram Chat-ID", hint: "Optional — deine Chat-ID für Alerts", placeholder: "z.B. 987654321" },
+];
+
+function SecretsSektion() {
+  const [meta, setMeta] = useState<Record<string, { set: boolean; updatedAt: string }>>({});
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<"idle" | "saved" | "error">("idle");
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/secrets", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        setMeta(data.secrets || {});
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleChange = (key: string, val: string) => {
+    setValues((prev) => ({ ...prev, [key]: val }));
+    setStatus("idle");
+  };
+
+  const save = async () => {
+    const toSave: Record<string, string> = {};
+    for (const [k, v] of Object.entries(values)) {
+      if (v.trim() !== "") toSave[k] = v;
+    }
+    if (Object.keys(toSave).length === 0) return;
+
+    setSaving(true);
+    try {
+      const res = await fetch("/api/secrets", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secrets: toSave }),
+      });
+      if (res.ok) {
+        setStatus("saved");
+        setValues({});
+        await load();
+        setTimeout(() => setStatus("idle"), 3000);
+      } else {
+        setStatus("error");
+      }
+    } catch {
+      setStatus("error");
+    }
+    setSaving(false);
+  };
+
+  const hasChanges = Object.values(values).some((v) => v.trim() !== "");
+
+  return (
+    <div className="card card-hover p-5 sm:p-6 transition-all">
+      <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
+            background: "var(--warn-bg)",
+            border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)",
+          }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0110 0v4" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">API-Schlüssel & Secrets</h3>
+            <p className="text-[11px] text-[var(--text-tertiary)]">Werden in der Datenbank gespeichert — der Pi lädt sie beim Start</p>
+          </div>
+        </div>
+        {hasChanges && (
+          <button
+            onClick={save}
+            disabled={saving}
+            className="px-4 py-2 rounded-xl text-[11px] font-semibold transition-all active:scale-95"
+            style={{
+              background: status === "saved" ? "var(--up-bg-strong)" : status === "error" ? "var(--down-bg-strong)" : "var(--warn-bg)",
+              color: status === "saved" ? "var(--up)" : status === "error" ? "var(--down)" : "var(--warn)",
+              border: `1px solid ${status === "saved" ? "var(--up)" : status === "error" ? "var(--down)" : "var(--warn)"}20`,
+            }}
+          >
+            {saving ? "Speichere..." : status === "saved" ? "Gespeichert" : status === "error" ? "Fehler" : "Secrets speichern"}
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        {SECRET_FIELDS.map((f) => {
+          const m = meta[f.key];
+          return (
+            <div key={f.key} className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="block text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium">{f.label}</label>
+                {m?.set && (
+                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-md bg-[var(--up-bg)] text-[var(--up)]">
+                    Gesetzt
+                  </span>
+                )}
+              </div>
+              <input
+                type="password"
+                value={values[f.key] ?? ""}
+                onChange={(e) => handleChange(f.key, e.target.value)}
+                placeholder={m?.set ? "••••••••  (neuen Wert eingeben zum Ändern)" : f.placeholder}
+                className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl px-3.5 py-2.5 text-sm font-mono text-[var(--text-primary)] placeholder:text-[var(--text-quaternary)] focus:border-[var(--warn)] focus:outline-none focus:ring-1 focus:ring-[var(--warn)]/20 transition-all"
+              />
+              {f.hint && <p className="text-[10px] text-[var(--text-tertiary)]">{f.hint}</p>}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 bg-[var(--bg-secondary)] rounded-xl p-3.5 border border-[var(--border-subtle)]">
+        <p className="text-[10px] text-[var(--text-tertiary)] leading-relaxed">
+          Secrets werden verschlüsselt in der Neon-Datenbank gespeichert. Der Pi lädt sie automatisch beim Start
+          und setzt sie als Umgebungsvariablen. So brauchst du auf dem Pi nur <span className="font-mono text-[var(--text-secondary)]">NEON_DATABASE_URL</span> in der .env Datei.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Install Guide ---- */
+
 const INSTALL_STEPS = [
   {
     nr: 1,
-    titel: "Neon Datenbank erstellen",
-    beschreibung: "Erstelle ein kostenloses Projekt auf neon.tech und kopiere den Connection-String.",
-    code: `# Format: postgresql://user:pass@ep-xxx.region.aws.neon.tech/neondb?sslmode=require`,
+    titel: "Raspberry Pi einrichten",
+    beschreibung: "Per SSH auf den Pi verbinden, Repository klonen und Setup ausfuehren:",
+    code: `ssh pi@raspberrypi\nsudo apt-get update && sudo apt-get install -y git\ngit clone https://github.com/wakemaster88/richbot.git ~/richbot\ncd ~/richbot\nsudo bash scripts/setup_pi.sh`,
   },
   {
     nr: 2,
-    titel: "Schema auf Neon pushen",
-    beschreibung: "Auf deinem Entwickler-PC (nicht dem Pi):",
-    code: `cd web\nnpm install\n\n# .env.local anlegen:\necho 'DATABASE_URL="postgresql://...deine-neon-url..."' > .env.local\necho 'DIRECT_DATABASE_URL="postgresql://...deine-neon-url..."' >> .env.local\n\nnpx prisma db push`,
+    titel: "Umgebungsvariablen konfigurieren",
+    beschreibung: "Nur eine Variable nötig — API-Keys werden über das Dashboard oben gesetzt:",
+    code: `# .env auf dem Pi — nur diese 3 Zeilen:\nNEON_DATABASE_URL=postgresql://...deine-neon-url...\nCLOUD_ENABLED=true\nCLOUD_BOT_ID=richbot-pi\n\n# Binance & Telegram Keys werden automatisch\n# aus der Datenbank geladen (siehe "API-Schlüssel" oben)`,
   },
   {
     nr: 3,
-    titel: "Dashboard auf Vercel deployen",
-    beschreibung: "Repository auf GitHub pushen und auf vercel.com importieren. Umgebungsvariablen setzen:",
-    code: `DATABASE_URL      = postgresql://...deine-neon-url...\nDIRECT_DATABASE_URL = postgresql://...deine-neon-url...\nBOT_ID            = richbot-pi`,
-  },
-  {
-    nr: 4,
-    titel: "Raspberry Pi einrichten",
-    beschreibung: "Code auf den Pi übertragen und Setup-Script ausführen:",
-    code: `# Code übertragen\nrsync -avz --exclude node_modules --exclude .next \\\n  ./ pi@raspberrypi:~/richbot/\n\n# Auf dem Pi:\nssh pi@raspberrypi\ncd ~/richbot\nsudo bash scripts/setup_pi.sh`,
-  },
-  {
-    nr: 5,
-    titel: "Umgebungsvariablen konfigurieren",
-    beschreibung: "Erstelle die .env Datei auf dem Raspberry Pi:",
-    code: `# .env auf dem Pi\nBINANCE_API_KEY=dein_key\nBINANCE_SECRET=dein_secret\nNEON_DATABASE_URL=postgresql://...deine-neon-url...\nCLOUD_ENABLED=true\nCLOUD_BOT_ID=richbot-pi\nTELEGRAM_TOKEN=optional\nTELEGRAM_CHAT_ID=optional`,
-  },
-  {
-    nr: 6,
     titel: "Bot starten",
     beschreibung: "Manuell oder als SystemD-Service für Auto-Start:",
     code: `# Manuell starten\ncd ~/richbot && source venv/bin/activate\npython main.py --config config_pi.json\n\n# Oder als Service (empfohlen)\nsudo systemctl enable richbot\nsudo systemctl start richbot\nsudo journalctl -u richbot -f  # Logs anzeigen`,
@@ -534,6 +650,9 @@ function RaspberryPiSektion() {
           </div>
         )}
       </div>
+
+      {/* Secrets */}
+      <SecretsSektion />
 
       {/* Installation Guide */}
       <div className="card card-hover p-5 sm:p-6 transition-all">

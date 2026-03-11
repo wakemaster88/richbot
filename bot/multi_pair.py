@@ -244,6 +244,7 @@ class MultiPairBot:
         logger.info("Starting multi-pair bot for %s", self.config.pairs)
 
         await self.cloud.start()
+        await self.cloud.fetch_env()
         self._register_cloud_commands()
         await self.cloud.sync_config(self.config.to_dict())
 
