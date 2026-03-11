@@ -134,6 +134,26 @@ class PairBot:
             self.ml, self.config.ml,
         )
 
+        min_fee_spacing = self.current_price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
+        levels_per_side = max(self.pair_grid_count // 2, 1)
+        min_half_range = levels_per_side * min_fee_spacing * 1.15
+        if self.current_range.spread < min_half_range * 2:
+            old_spread = self.current_range.spread
+            new_half = min_half_range
+            self.current_range = RangeResult(
+                upper=self.current_price + new_half,
+                lower=self.current_price - new_half,
+                mid=self.current_price,
+                atr=self.current_range.atr,
+                source=self.current_range.source,
+                confidence=self.current_range.confidence,
+            )
+            logger.info(
+                "%s Range geweitet: %.2f → %.2f (min. fuer %d Level mit Fee-Spacing %.2f)",
+                self.pair, old_spread, self.current_range.spread,
+                self.pair_grid_count, min_fee_spacing,
+            )
+
         vol = self.risk.calculate_volatility(df["close"].values)
         balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
 
@@ -245,6 +265,15 @@ class PairBot:
                 await self.order_mgr.cancel_all(self.pair)
 
                 new_range = shift_range(self.current_range, breakout)
+                min_fs = price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
+                lps = max(self.pair_grid_count // 2, 1)
+                min_hr = lps * min_fs * 1.15
+                if new_range.spread < min_hr * 2:
+                    new_range = RangeResult(
+                        upper=price + min_hr, lower=price - min_hr,
+                        mid=price, atr=new_range.atr, source=new_range.source,
+                        confidence=new_range.confidence,
+                    )
                 self.current_range = new_range
                 self.grid.trail_grid(breakout, price, new_range, self.pair_amount)
                 placed = await self.order_mgr.place_grid_orders(self.pair)

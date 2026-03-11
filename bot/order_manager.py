@@ -45,6 +45,8 @@ class OrderManager:
         self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
         self.last_fail_reason: str = ""
         self._consecutive_fails: int = 0
+        self._paused_levels: set[str] = set()  # level_ids paused due to balance issues
+        self._pause_until: float = 0  # timestamp until retries are suppressed
 
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
@@ -57,6 +59,12 @@ class OrderManager:
             price=level.price, amount=level.amount, grid_level=level,
         )
 
+    def reset_paused_levels(self):
+        """Call after a fill or balance change to allow retrying failed orders."""
+        self._paused_levels.clear()
+        self._pause_until = 0
+        self._consecutive_fails = 0
+
     async def place_grid_orders(self, symbol: str) -> list[ManagedOrder]:
         """Place all pending grid orders."""
         can_trade, reason = self.risk.can_trade()
@@ -64,15 +72,18 @@ class OrderManager:
             logger.warning("Trading paused: %s", reason)
             return []
 
-        if self._consecutive_fails >= 3:
-            self._consecutive_fails -= 1
+        now = time.time()
+        if now < self._pause_until:
             return []
 
         levels = self.grid.get_levels_to_place()
         placed = []
         self.last_fail_reason = ""
+        failures_this_round = 0
 
         for level in levels:
+            if level.level_id in self._paused_levels:
+                continue
             try:
                 if level.side == "buy":
                     order = await self.exchange.async_create_limit_buy(
@@ -101,13 +112,26 @@ class OrderManager:
                             level.side, symbol, level.amount, level.price, order["id"])
 
             except Exception as e:
+                err = str(e).lower()
                 self.last_fail_reason = str(e)
-                self._consecutive_fails += 1
-                if self._consecutive_fails <= 3:
-                    logger.error("Failed to place %s order @ %.2f: %s", level.side, level.price, e)
+                failures_this_round += 1
+
+                if "insufficient balance" in err or "notional" in err:
+                    self._paused_levels.add(level.level_id)
+                    if failures_this_round <= 2:
+                        logger.warning("Order %s @ %.2f pausiert (Balance): %s",
+                                       level.side, level.price, e)
+                elif failures_this_round <= 3:
+                    logger.error("Failed to place %s order @ %.2f: %s",
+                                 level.side, level.price, e)
 
         if placed:
             self._consecutive_fails = 0
+        elif failures_this_round > 0:
+            self._consecutive_fails += 1
+            if self._consecutive_fails >= 3:
+                self._pause_until = now + 120
+                logger.warning("Order-Placement 3x fehlgeschlagen — Pause fuer 2 Min")
         return placed
 
     async def cancel_all(self, symbol: str):
@@ -121,6 +145,7 @@ class OrderManager:
                     cancelled += 1
                 except Exception as e:
                     logger.warning("Cancel failed for %s: %s", oid, e)
+        self.reset_paused_levels()
         logger.info("Cancelled %d orders for %s", cancelled, symbol)
 
     async def check_fills(self, symbol: str) -> list[ManagedOrder]:
@@ -154,6 +179,9 @@ class OrderManager:
 
         except Exception as e:
             logger.error("Error checking fills: %s", e)
+
+        if filled:
+            self.reset_paused_levels()
 
         return filled
 
