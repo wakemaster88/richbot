@@ -6,7 +6,7 @@
     "sandbox": false,
     "rate_limit": true
   },
-  "pairs": ["BTC/USDC"],
+  "pairs": ["BTC/USDC", "SOL/USDC"],
   "grid": {
     "grid_count": 4,
     "spacing_percent": 0.5,

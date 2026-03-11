@@ -47,10 +47,13 @@ class PairBot:
         self.ml = ml_predictor
         self.cloud = cloud
 
+        self.pair_grid_count = config.grid.grid_count
+        self.pair_amount = config.grid.amount_per_order
+
         self.grid = GridEngine(
-            grid_count=config.grid.grid_count,
+            grid_count=self.pair_grid_count,
             spacing_percent=config.grid.spacing_percent,
-            amount_per_order=config.grid.amount_per_order,
+            amount_per_order=self.pair_amount,
             infinity_mode=config.grid.infinity_mode,
             trail_trigger_percent=config.grid.trail_trigger_percent,
         )
@@ -61,6 +64,7 @@ class PairBot:
         self._running = False
 
         self.quote = pair.split("/")[1] if "/" in pair else "USDT"
+        self.base = pair.split("/")[0] if "/" in pair else pair
         self.order_mgr.on_fill(self._on_fill)
 
     def _on_fill(self, managed_order):
@@ -147,7 +151,7 @@ class PairBot:
                 self.pair, dynamic_amount, dynamic_amount * self.current_price, self.quote, min_notional,
             )
 
-        grid_count = self.config.grid.grid_count
+        grid_count = self.pair_grid_count
         buy_count = grid_count // 2
         sell_count = grid_count - buy_count
         max_buy_orders = int(usdt_balance / (dynamic_amount * self.current_price)) if self.current_price > 0 else 0
@@ -157,7 +161,7 @@ class PairBot:
         if affordable < grid_count:
             old_count = grid_count
             grid_count = max(2, affordable)
-            self.config.grid.grid_count = grid_count
+            self.pair_grid_count = grid_count
             self.grid.grid_count = grid_count
             logger.warning(
                 "%s Grid reduziert: %d → %d Level (max %d Buy + %d Sell leistbar)",
@@ -314,7 +318,7 @@ class PairBot:
             "range": f"[{self.current_range.lower:.2f}, {self.current_range.upper:.2f}]" if self.current_range else "N/A",
             "range_source": self.current_range.source if self.current_range else "N/A",
             "grid_levels": len(self.grid.state.levels),
-            "grid_configured": self.grid.grid_count,
+            "grid_configured": self.pair_grid_count,
             "active_orders": len(open_orders),
             "filled_orders": len(self.order_mgr.get_filled_orders(self.pair)),
             "open_orders": orders_list,
@@ -663,14 +667,12 @@ class MultiPairBot:
                 cost_per_level = min_amount * bot.current_price
                 max_affordable = int((total_equity * 0.85) / cost_per_level) if cost_per_level > 0 else 4
                 optimal = max(4, min(max_affordable, 20))
-
-                current = len(bot.grid.state.levels)
-                configured = self.config.grid.grid_count
+                configured = bot.pair_grid_count
 
                 if optimal != configured and abs(optimal - configured) >= 2:
                     old = configured
-                    self.config.grid.grid_count = optimal
-                    self.config.grid.amount_per_order = min_amount
+                    bot.pair_grid_count = optimal
+                    bot.pair_amount = min_amount
 
                     bot.grid = GridEngine(
                         grid_count=optimal,
@@ -687,8 +689,8 @@ class MultiPairBot:
                         await bot.order_mgr.place_grid_orders(pair)
 
                     logger.info(
-                        "%s Auto-Grid: %d → %d Level (Kapital: %.2f %s, %.8f BTC/Order)",
-                        pair, old, optimal, total_equity, bot.quote, min_amount,
+                        "%s Auto-Grid: %d → %d Level (Kapital: %.2f %s, %.8f %s/Order)",
+                        pair, old, optimal, total_equity, bot.quote, min_amount, bot.base,
                     )
             except Exception as e:
                 logger.warning("Auto-grid adjust failed for %s: %s", pair, e)
@@ -788,10 +790,12 @@ class MultiPairBot:
             updated = self._apply_config(payload)
             if any(k.startswith("grid.") for k in updated):
                 for pair, bot in self.pair_bots.items():
+                    bot.pair_grid_count = self.config.grid.grid_count
+                    bot.pair_amount = self.config.grid.amount_per_order
                     bot.grid = GridEngine(
-                        grid_count=self.config.grid.grid_count,
+                        grid_count=bot.pair_grid_count,
                         spacing_percent=self.config.grid.spacing_percent,
-                        amount_per_order=self.config.grid.amount_per_order,
+                        amount_per_order=bot.pair_amount,
                         infinity_mode=self.config.grid.infinity_mode,
                         trail_trigger_percent=self.config.grid.trail_trigger_percent,
                     )
@@ -799,14 +803,14 @@ class MultiPairBot:
                     if bot.current_range and bot.current_price:
                         try:
                             await bot.order_mgr.cancel_all(pair)
-                            bot.grid.calculate_grid(bot.current_range, bot.current_price, self.config.grid.amount_per_order)
+                            bot.grid.calculate_grid(bot.current_range, bot.current_price, bot.pair_amount)
                             await bot.order_mgr.place_grid_orders(pair)
                             actual = len(bot.grid.state.levels)
-                            logger.info("%s Grid neu berechnet: %d/%d Level (angefragt/tatsaechlich), %.8f pro Order",
-                                        pair, self.config.grid.grid_count, actual, self.config.grid.amount_per_order)
-                            if actual < self.config.grid.grid_count:
+                            logger.info("%s Grid neu berechnet: %d/%d Level (angefragt/tatsaechlich), %.8f %s/Order",
+                                        pair, bot.pair_grid_count, actual, bot.pair_amount, bot.base)
+                            if actual < bot.pair_grid_count:
                                 logger.warning("%s Nur %d von %d Level moeglich (Range zu eng fuer Fee-Spacing)",
-                                               pair, actual, self.config.grid.grid_count)
+                                               pair, actual, bot.pair_grid_count)
                         except Exception as e:
                             logger.error("Grid re-init failed for %s: %s", pair, e)
             if self.cloud.connected:

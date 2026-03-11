@@ -125,9 +125,12 @@ function fmt(n: number, d = 2): string {
   return n.toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
-function fmtSats(n: number): string {
-  const sats = Math.round(n * 1e8);
-  return sats.toLocaleString("de-DE") + " sat";
+function fmtAmount(n: number, base: string): string {
+  if (base === "BTC") {
+    const sats = Math.round(n * 1e8);
+    return sats.toLocaleString("de-DE") + " sat";
+  }
+  return n.toLocaleString("de-DE", { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + " " + base;
 }
 
 // -- Skeleton --
@@ -476,7 +479,7 @@ function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: st
               </span>
             </div>
             <div className="flex justify-between text-[9px] text-[var(--text-quaternary)]">
-              <span className="font-mono">{fmtSats(t.amount)} ({fmt(t.amount * t.price)} {quote})</span>
+              <span className="font-mono">{fmtAmount(t.amount, t.pair.split("/")[0])} ({fmt(t.amount * t.price)} {quote})</span>
               <span>{new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
             </div>
           </div>
@@ -509,7 +512,7 @@ function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: st
                   }}>{t.side === "buy" ? "KAUF" : "VERK."}</span>
                 </td>
                 <td className="px-4 py-2 text-right font-mono">{fmt(t.price, 0)}</td>
-                <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmtSats(t.amount)}</td>
+                <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmtAmount(t.amount, t.pair.split("/")[0])}</td>
                 <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmt(t.amount * t.price)} {quote}</td>
                 <td className="px-4 py-2 text-right font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
                   {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)}
@@ -693,26 +696,20 @@ export default function Dashboard() {
         <MiniStat label="Drawdown" wert={`${fmt(maxDd)}%`} farbe={maxDd > 5 ? "text-[var(--down)]" : "text-[var(--warn)]"} />
       </div>
 
-      {/* Main Grid: Price Chart + Pair Card */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-3">
-        <div className="lg:col-span-3">
-          {pairs.length > 0
-            ? <PreisChart pair={pairs[0][0]} orders={pairs[0][1].open_orders} quote={quoteCcy} />
-            : <PreisChart pair="BTC/USDC" quote={quoteCcy} />
-          }
+      {/* Pair Sections */}
+      {pairs.length > 0 ? pairs.map(([p, m]) => (
+        <div key={p} className="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-3">
+          <div className="lg:col-span-3">
+            <PreisChart pair={p} orders={m.open_orders} quote={quoteCcy} />
+          </div>
+          <div className="lg:col-span-2">
+            <PairKarte pair={p} m={m} quote={quoteCcy} />
+          </div>
         </div>
-        <div className="lg:col-span-2">
-          {pairs.length > 0
-            ? <PairKarte pair={pairs[0][0]} m={pairs[0][1]} quote={quoteCcy} />
-            : <div className="card p-5 h-full flex items-center justify-center text-[11px] text-[var(--text-quaternary)]">Keine Paare aktiv</div>
-          }
-        </div>
-      </div>
-
-      {/* Additional Pairs */}
-      {pairs.length > 1 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-          {pairs.slice(1).map(([p, m]) => <PairKarte key={p} pair={p} m={m} quote={quoteCcy} />)}
+      )) : (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-3">
+          <div className="lg:col-span-3"><PreisChart pair="BTC/USDC" quote={quoteCcy} /></div>
+          <div className="lg:col-span-2 card p-5 flex items-center justify-center text-[11px] text-[var(--text-quaternary)]">Keine Paare aktiv</div>
         </div>
       )}
 

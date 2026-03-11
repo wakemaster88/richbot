@@ -100,7 +100,7 @@ function deepMerge<T extends object>(defaults: T, override: Partial<T>): T {
 
 const DEFAULTS: BotConfigData = {
   exchange: { name: "binance", sandbox: false },
-  pairs: ["BTC/USDC"],
+  pairs: ["BTC/USDC", "SOL/USDC"],
   grid: {
     grid_count: 4,
     spacing_percent: 0.5,
@@ -746,15 +746,19 @@ function calcSmartGrid(equity: number, price: number): SmartGridResult {
   return { gridCount, amountPerOrder: minAmount, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
 }
 
-function SmartGridPanel({ gridCount, amountPerOrder, onApply }: {
-  gridCount: number; amountPerOrder: number;
+function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
+  gridCount: number; amountPerOrder: number; pairs: string[];
   onApply: (result: SmartGridResult) => void;
 }) {
   const [price, setPrice] = useState<number | null>(null);
   const [equity, setEquity] = useState<number | null>(null);
 
+  const firstPair = pairs[0] || "BTC/USDC";
+  const base = firstPair.split("/")[0] || "BTC";
+  const symbol = firstPair.replace("/", "");
+
   useEffect(() => {
-    fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDC")
+    fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`)
       .then((r) => r.json())
       .then((d) => setPrice(parseFloat(d.price)))
       .catch(() => {});
@@ -762,12 +766,15 @@ function SmartGridPanel({ gridCount, amountPerOrder, onApply }: {
       .then((r) => r.json())
       .then((d) => {
         if (d?.dbConnected && d?.pairStatuses) {
-          const first = Object.values(d.pairStatuses)[0] as { current_equity?: number } | undefined;
-          if (first?.current_equity) setEquity(first.current_equity);
+          let totalEq = 0;
+          for (const ps of Object.values(d.pairStatuses) as { current_equity?: number }[]) {
+            totalEq += ps.current_equity || 0;
+          }
+          if (totalEq > 0) setEquity(totalEq);
         }
       })
       .catch(() => {});
-  }, []);
+  }, [symbol]);
 
   if (!price) return null;
 
@@ -836,7 +843,7 @@ function SmartGridPanel({ gridCount, amountPerOrder, onApply }: {
           background: "var(--accent-bg)", color: "var(--accent)",
           borderColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
         }}>
-          Smart-Empfehlung: <strong>{smart.gridCount} Level</strong>, {smart.amountPerOrder} BTC/Order, Range ×{smart.rangeMultiplier}
+          Smart-Empfehlung: <strong>{smart.gridCount} Level</strong>, {smart.amountPerOrder} {base}/Order, Range ×{smart.rangeMultiplier}
         </div>
       )}
 
@@ -868,7 +875,7 @@ function SmartGridPanel({ gridCount, amountPerOrder, onApply }: {
       </div>
 
       <p className="text-[9px] text-[var(--text-quaternary)] mt-2.5">
-        Klicke auf ein Level um es direkt zu uebernehmen. Smart Grid optimiert alle Einstellungen automatisch.
+        Klicke auf ein Level um es zu uebernehmen. Smart Grid optimiert alle Einstellungen fuer {firstPair} automatisch.
       </p>
     </div>
   );
@@ -1324,7 +1331,7 @@ export default function SettingsPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Zahl label="Anzahl Grid-Level" value={config.grid?.grid_count} onChange={(v) => update("grid.grid_count", v)} min={4} max={100} hint="Mehr Level = engeres Grid, mehr Trades" />
             <Zahl label="Abstand %" value={config.grid?.spacing_percent} onChange={(v) => update("grid.spacing_percent", v)} step={0.1} min={0.1} max={5} hint="Prozent-Abstand zwischen den Leveln" />
-            <Zahl label="Betrag pro Order (BTC)" value={config.grid?.amount_per_order} onChange={(v) => update("grid.amount_per_order", v)} step={0.0001} min={0.0001} hint="Min. 0.0001 BTC (~$7 bei $70k). Muss ueber Binance Mindest-Orderwert liegen." />
+            <Zahl label={`Betrag pro Order (${(config.pairs?.[0] || "BTC/USDC").split("/")[0]})`} value={config.grid?.amount_per_order} onChange={(v) => update("grid.amount_per_order", v)} step={0.0001} min={0.0001} hint="Muss ueber Binance Mindest-Orderwert liegen." />
             <Zahl label="Range-Multiplikator" value={config.grid?.range_multiplier} onChange={(v) => update("grid.range_multiplier", v)} step={0.1} min={0.5} max={5} />
             <Zahl label="Trail-Schwelle %" value={config.grid?.trail_trigger_percent} onChange={(v) => update("grid.trail_trigger_percent", v)} step={0.1} min={0.5} max={10} hint="Ausbruch-Schwelle fur Grid-Verschiebung" />
           </div>
@@ -1332,6 +1339,7 @@ export default function SettingsPage() {
           <SmartGridPanel
             gridCount={config.grid?.grid_count || 4}
             amountPerOrder={config.grid?.amount_per_order || 0.0001}
+            pairs={config.pairs || ["BTC/USDC"]}
             onApply={(r) => {
               update("grid.grid_count", r.gridCount);
               update("grid.amount_per_order", r.amountPerOrder);
