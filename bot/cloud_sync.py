@@ -121,7 +121,7 @@ class CloudSync:
             return
         try:
             uptime = int(time.time() - self._start_time)
-            mem = self._get_system_info()
+            mem = await asyncio.to_thread(self._get_system_info)
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO heartbeats (id, bot_id, status, pairs, uptime, memory, metrics) "

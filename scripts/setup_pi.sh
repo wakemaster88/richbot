@@ -12,16 +12,16 @@ echo "  RichBot — Raspberry Pi 5 Setup"
 echo "==========================================="
 
 # --- System Dependencies ---
-echo "[1/7] Installing system dependencies..."
+echo "[1/8] Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq \
     python3.11 python3.11-venv python3.11-dev \
-    libatlas-base-dev libhdf5-dev \
+    libatlas-base-dev \
     build-essential git \
     sqlite3
 
-# --- Swap Configuration (important for training/optimization) ---
-echo "[2/7] Configuring swap..."
+# --- Swap Configuration ---
+echo "[2/8] Configuring swap..."
 SWAP_SIZE=2048
 if [ -f /etc/dphys-swapfile ]; then
     CURRENT_SWAP=$(grep CONF_SWAPSIZE /etc/dphys-swapfile | cut -d= -f2)
@@ -42,14 +42,14 @@ else
 fi
 
 # --- SD Card / Storage Optimization ---
-echo "[3/7] Optimizing storage I/O..."
+echo "[3/8] Optimizing storage I/O..."
 if ! grep -q "noatime" /etc/fstab; then
     sed -i 's/defaults/defaults,noatime,commit=120/' /etc/fstab
     echo "  Added noatime and commit=120 to fstab (reduces SD writes)"
 fi
 
 # --- Project Setup ---
-echo "[4/7] Setting up project..."
+echo "[4/8] Setting up project..."
 if [ ! -d "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
     cp -r . "$INSTALL_DIR/"
@@ -60,20 +60,29 @@ mkdir -p "$INSTALL_DIR"/{data,models,logs}
 chown -R $USER:$USER "$INSTALL_DIR"/{data,models,logs}
 
 # --- Python Virtual Environment ---
-echo "[5/7] Creating Python environment..."
+echo "[5/8] Creating Python environment..."
 sudo -u $USER python3.11 -m venv "$VENV_DIR"
 sudo -u $USER "$VENV_DIR/bin/pip" install --upgrade pip wheel
 sudo -u $USER "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements_pi.txt"
 
+# --- tmpfs for Logs (RAM-based, reduces SD writes) ---
+echo "[6/8] Setting up tmpfs for logs..."
+if ! grep -q "richbot/logs" /etc/fstab; then
+    echo "tmpfs $INSTALL_DIR/logs tmpfs defaults,noatime,nosuid,nodev,size=32M,mode=0755,uid=$(id -u $USER),gid=$(id -g $USER) 0 0" >> /etc/fstab
+    mount -a 2>/dev/null || true
+    echo "  Logs directory mounted as tmpfs (32MB RAM disk)"
+    echo "  Note: Logs are lost on reboot — use journalctl for persistent logs"
+fi
+
 # --- SystemD Service ---
-echo "[6/7] Installing systemd service..."
+echo "[7/8] Installing systemd service..."
 cp "$INSTALL_DIR/scripts/richbot.service" /etc/systemd/system/richbot.service
 systemctl daemon-reload
 systemctl enable richbot.service
 echo "  Service installed (start with: sudo systemctl start richbot)"
 
 # --- Kernel Tuning ---
-echo "[7/7] Applying kernel tuning..."
+echo "[8/8] Applying kernel tuning..."
 SYSCTL_CONF="/etc/sysctl.d/99-richbot.conf"
 cat > "$SYSCTL_CONF" << 'SYSCTL'
 # Reduce swappiness (prefer RAM over swap)
@@ -112,8 +121,14 @@ echo "     sudo systemctl status richbot"
 echo "     journalctl -u richbot -f"
 echo ""
 echo "Memory budget on Pi 5 (8GB):"
-echo "  Bot:       ~300-400 MB (with TFLite + cloud sync)"
-echo "  Optimizer: ~500-600 MB (run sparingly)"
+echo "  Bot:       ~150-250 MB (optimized deps + cloud sync)"
 echo "  System:    ~1-2 GB"
 echo "  Free:      ~5-6 GB"
+echo ""
+echo "Optimizations applied:"
+echo "  - tmpfs for logs (no SD card writes)"
+echo "  - WAL journal + batched SQLite writes"
+echo "  - noatime + commit=120 for SD"
+echo "  - Kernel tuning for low swappiness"
+echo "  - Minimal dependencies (no optuna/streamlit/scipy)"
 echo ""

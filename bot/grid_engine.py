@@ -37,22 +37,42 @@ class GridState:
     mode: GridMode = GridMode.INFINITY
     shift_count: int = 0
     last_price: float = 0.0
+    _cache_ver: int = 0
+    _buy_cache: list[GridLevel] | None = field(default=None, repr=False)
+    _sell_cache: list[GridLevel] | None = field(default=None, repr=False)
+    _active_cache: list[GridLevel] | None = field(default=None, repr=False)
+    _filled_cache: list[GridLevel] | None = field(default=None, repr=False)
+
+    def invalidate(self):
+        self._cache_ver += 1
+        self._buy_cache = None
+        self._sell_cache = None
+        self._active_cache = None
+        self._filled_cache = None
 
     @property
     def buy_levels(self) -> list[GridLevel]:
-        return [l for l in self.levels if l.side == "buy"]
+        if self._buy_cache is None:
+            self._buy_cache = [l for l in self.levels if l.side == "buy"]
+        return self._buy_cache
 
     @property
     def sell_levels(self) -> list[GridLevel]:
-        return [l for l in self.levels if l.side == "sell"]
+        if self._sell_cache is None:
+            self._sell_cache = [l for l in self.levels if l.side == "sell"]
+        return self._sell_cache
 
     @property
     def active_levels(self) -> list[GridLevel]:
-        return [l for l in self.levels if not l.filled]
+        if self._active_cache is None:
+            self._active_cache = [l for l in self.levels if not l.filled]
+        return self._active_cache
 
     @property
     def filled_levels(self) -> list[GridLevel]:
-        return [l for l in self.levels if l.filled]
+        if self._filled_cache is None:
+            self._filled_cache = [l for l in self.levels if l.filled]
+        return self._filled_cache
 
 
 class GridEngine:
@@ -109,6 +129,7 @@ class GridEngine:
 
         levels.sort(key=lambda l: l.price)
         self.state.levels = levels
+        self.state.invalidate()
 
         logger.info(
             "Grid calculated: %d levels (buy=%d, sell=%d) in [%.2f, %.2f]",
@@ -147,6 +168,7 @@ class GridEngine:
         for level in self.state.levels:
             if level.order_id == order_id:
                 level.filled = True
+                self.state.invalidate()
                 logger.info("Grid level filled: %s @ %.2f", level.side, level.price)
                 return level
         return None
@@ -172,3 +194,4 @@ class GridEngine:
         self.state = GridState(
             mode=GridMode.INFINITY if self.infinity_mode else GridMode.STATIC,
         )
+        self.state.invalidate()

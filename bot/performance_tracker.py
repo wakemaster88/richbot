@@ -59,8 +59,12 @@ class PerformanceTracker:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.pair_stats: dict[str, PairPerformance] = {}
         self._equity_limit = 2000 if pi_mode else equity_history_limit
+        self._pnl_limit = 1000 if pi_mode else 5000
         self._pi_mode = pi_mode
         self._conn: sqlite3.Connection | None = None
+        self._write_queue: list[tuple[str, tuple]] = []
+        self._last_flush = time.time()
+        self._flush_interval = 10 if pi_mode else 2
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -117,6 +121,24 @@ class PerformanceTracker:
             self.pair_stats[pair] = PairPerformance(pair=pair)
         return self.pair_stats[pair]
 
+    def _queue_write(self, sql: str, params: tuple):
+        self._write_queue.append((sql, params))
+        if len(self._write_queue) >= 20 or time.time() - self._last_flush >= self._flush_interval:
+            self.flush()
+
+    def flush(self):
+        if not self._write_queue:
+            return
+        conn = self._get_conn()
+        try:
+            for sql, params in self._write_queue:
+                conn.execute(sql, params)
+            conn.commit()
+        except Exception as e:
+            logger.error("Batch write failed: %s", e)
+        self._write_queue.clear()
+        self._last_flush = time.time()
+
     def record_trade(self, trade: TradeRecord):
         """Record a completed trade."""
         stats = self._get_pair_stats(trade.pair)
@@ -126,19 +148,20 @@ class PerformanceTracker:
         stats.fees_paid += trade.fee
         stats.pnl_history.append((trade.timestamp, stats.realized_pnl))
 
+        if len(stats.pnl_history) > self._pnl_limit:
+            stats.pnl_history = stats.pnl_history[-(self._pnl_limit // 2):]
+
         if trade.side == "buy":
             stats.buy_count += 1
         else:
             stats.sell_count += 1
 
-        conn = self._get_conn()
-        conn.execute(
+        self._queue_write(
             "INSERT INTO trades (timestamp, pair, side, price, amount, fee, pnl, grid_level, order_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (trade.timestamp, trade.pair, trade.side, trade.price,
              trade.amount, trade.fee, trade.pnl, trade.grid_level, trade.order_id),
         )
-        conn.commit()
         logger.info("Trade recorded: %s %s %.6f @ %.2f (PnL: %.4f)", trade.side, trade.pair, trade.amount, trade.price, trade.pnl)
 
     def update_equity(self, pair: str, equity: float, unrealized_pnl: float = 0.0):
@@ -163,28 +186,35 @@ class PerformanceTracker:
         if len(stats.equity_history) > self._equity_limit:
             stats.equity_history = stats.equity_history[-(self._equity_limit // 2):]
 
-        conn = self._get_conn()
-        conn.execute(
+        self._queue_write(
             "INSERT INTO equity_snapshots (timestamp, pair, equity, unrealized_pnl) VALUES (?, ?, ?, ?)",
             (now, pair, equity, unrealized_pnl),
         )
-        conn.commit()
 
     def get_sharpe_ratio(self, pair: str, risk_free_rate: float = 0.0) -> float:
-        """Annualized Sharpe Ratio from equity curve."""
+        """Annualized Sharpe Ratio from equity curve (cached per 50 updates)."""
         stats = self._get_pair_stats(pair)
-        if len(stats.equity_history) < 10:
+        hist_len = len(stats.equity_history)
+        if hist_len < 10:
             return 0.0
 
-        equities = np.array([e for _, e in stats.equity_history])
-        returns = np.diff(equities) / equities[:-1]
+        cache_key = f"_sharpe_{pair}"
+        cached = getattr(self, cache_key, None)
+        if cached and cached[0] == hist_len // 50:
+            return cached[1]
 
-        if len(returns) == 0 or np.std(returns) == 0:
+        equities = np.array([e for _, e in stats.equity_history[-2000:]], dtype=np.float32)
+        returns = np.diff(equities) / np.maximum(equities[:-1], 1e-8)
+
+        std = float(np.std(returns))
+        if std == 0:
             return 0.0
 
         periods_per_year = 365 * 24 * 4
-        excess_return = np.mean(returns) - risk_free_rate / periods_per_year
-        return float(excess_return / np.std(returns) * np.sqrt(periods_per_year))
+        excess_return = float(np.mean(returns)) - risk_free_rate / periods_per_year
+        result = float(excess_return / std * np.sqrt(periods_per_year))
+        setattr(self, cache_key, (hist_len // 50, result))
+        return result
 
     def get_annualized_return(self, pair: str) -> float:
         stats = self._get_pair_stats(pair)
@@ -256,6 +286,7 @@ class PerformanceTracker:
         conn.commit()
 
     def close(self):
+        self.flush()
         if self._conn:
             self._conn.close()
             self._conn = None

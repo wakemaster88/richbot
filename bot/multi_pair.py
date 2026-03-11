@@ -352,13 +352,14 @@ class MultiPairBot:
 
     async def _equity_loop(self):
         while self._running:
-            for pair, bot in self.pair_bots.items():
-                await bot.update_equity()
+            await asyncio.gather(
+                *(bot.update_equity() for bot in self.pair_bots.values()),
+                return_exceptions=True,
+            )
+            self.tracker.flush()
 
             if self.cloud.connected:
-                metrics = {}
-                for pair, bot in self.pair_bots.items():
-                    metrics[pair] = bot.get_status()
+                metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
                 self.cloud.update_status("running", self.config.pairs, metrics)
 
             await asyncio.sleep(60)
@@ -377,8 +378,8 @@ class MultiPairBot:
         interval = self.config.pi.gc_interval_seconds
         while self._running:
             await asyncio.sleep(interval)
-            collected = gc.collect()
-            if collected > 0:
+            collected = await asyncio.to_thread(gc.collect)
+            if collected > 50:
                 logger.debug("GC collected %d objects", collected)
 
     async def stop(self):
