@@ -648,10 +648,44 @@ class MultiPairBot:
 
             await asyncio.sleep(60)
 
+    @staticmethod
+    def _score_grid(n: int, half_equity: float, price: float,
+                    min_amount: float, step_size: float) -> tuple[float, float]:
+        """Score a grid level count by expected daily return. Returns (score, amount)."""
+        import math as _m
+        ROUNDTRIP_FEE = 0.002
+        DAILY_VOL = 0.025
+        R = DAILY_VOL * 1.2
+
+        per_side = n // 2
+        raw = half_equity / (per_side * price)
+        amount = _m.ceil(raw / step_size) * step_size
+        if amount * price * per_side > half_equity * 1.05:
+            amount = min_amount
+        if amount < min_amount:
+            return (-1.0, min_amount)
+        if amount * price * per_side > half_equity * 1.05:
+            return (-1.0, min_amount)
+
+        order_val = amount * price
+        positions = [((i + 1) / per_side) ** 0.6 for i in range(per_side)]
+
+        daily = 0.0
+        for i in range(per_side):
+            dist = R * positions[i]
+            spacing = dist if i == 0 else R * (positions[i] - positions[i - 1])
+            if spacing <= ROUNDTRIP_FEE:
+                continue
+            profit = (spacing - ROUNDTRIP_FEE) * order_val
+            rt = min(3.0, DAILY_VOL / (2 * dist) * 0.5)
+            daily += profit * rt
+        return (daily, amount)
+
     async def _auto_adjust_grid(self):
-        """Adjust grid level count based on current balance — runs every ~5 minutes."""
+        """Adjust grid to maximize expected return — runs every ~5 minutes."""
         import math
 
+        pair_count = len(self.pair_bots)
         for pair, bot in list(self.pair_bots.items()):
             try:
                 balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
@@ -676,28 +710,29 @@ class MultiPairBot:
 
                 min_amount = math.ceil((min_notional * 1.15) / price / step_size) * step_size
 
-                usable = total_equity * 0.80
-                half = usable / 2
-                cost_per_side = min_amount * price
-                max_per_side = int(half / cost_per_side) if cost_per_side > 0 else 2
-                max_total = max_per_side * 2
-                optimal = max(4, min(max_total, 20))
+                eq_per_pair = total_equity / max(1, pair_count)
+                half = eq_per_pair * 0.80 / 2
+
+                best_n = 4
+                best_score = -1.0
+                best_amount = min_amount
+                for n in range(4, 22, 2):
+                    score, amount = self._score_grid(n, half, price, min_amount, step_size)
+                    if score > best_score:
+                        best_score = score
+                        best_n = n
+                        best_amount = amount
 
                 configured = bot.pair_grid_count
-
-                if optimal != configured and abs(optimal - configured) >= 2:
+                if best_n != configured and abs(best_n - configured) >= 2:
                     old = configured
-                    buy_levels = math.ceil(optimal / 2)
-                    opt_amount = math.ceil(half / (buy_levels * price) / step_size) * step_size
-                    amount = max(min_amount, opt_amount)
-
-                    bot.pair_grid_count = optimal
-                    bot.pair_amount = amount
+                    bot.pair_grid_count = best_n
+                    bot.pair_amount = best_amount
 
                     bot.grid = GridEngine(
-                        grid_count=optimal,
+                        grid_count=best_n,
                         spacing_percent=self.config.grid.spacing_percent,
-                        amount_per_order=amount,
+                        amount_per_order=best_amount,
                         infinity_mode=self.config.grid.infinity_mode,
                         trail_trigger_percent=self.config.grid.trail_trigger_percent,
                     )
@@ -705,12 +740,13 @@ class MultiPairBot:
 
                     if bot.current_range and price:
                         await bot.order_mgr.cancel_all(pair)
-                        bot.grid.calculate_grid(bot.current_range, price, amount)
+                        bot.grid.calculate_grid(bot.current_range, price, best_amount)
                         await bot.order_mgr.place_grid_orders(pair)
 
+                    daily_pct = (best_score / eq_per_pair * 100) if eq_per_pair > 0 else 0
                     logger.info(
-                        "%s Auto-Grid: %d → %d Level (Kapital: %.2f %s, %.8f %s/Order)",
-                        pair, old, optimal, total_equity, bot.quote, amount, bot.base,
+                        "%s Auto-Grid: %d → %d Level (~%.2f%%/Tag, Kapital: %.2f %s, %.8f %s/Order)",
+                        pair, old, best_n, daily_pct, total_equity, bot.quote, best_amount, bot.base,
                     )
             except Exception as e:
                 logger.warning("Auto-grid adjust failed for %s: %s", pair, e)

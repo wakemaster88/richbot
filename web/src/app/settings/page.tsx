@@ -730,39 +730,6 @@ interface SmartGridResult {
   maxPosition: number;
 }
 
-function calcSmartGrid(equity: number, price: number): SmartGridResult {
-  const MIN_NOTIONAL = 5.0;
-  const FEE_RATE = 0.001;
-  const SAFETY = 0.80;
-
-  const usableEquity = equity * SAFETY;
-  const halfEquity = usableEquity / 2;
-
-  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, stepForPrice(price));
-
-  const maxBuyLevels = Math.floor(halfEquity / (minAmount * price));
-  const maxSellLevels = maxBuyLevels;
-  const maxTotalLevels = maxBuyLevels + maxSellLevels;
-  const gridCount = Math.max(4, Math.min(maxTotalLevels, 20));
-
-  const buyLevels = Math.ceil(gridCount / 2);
-  const optimalAmount = ceilStep(halfEquity / (buyLevels * price), stepForPrice(price));
-  const amountPerOrder = Math.max(minAmount, optimalAmount);
-
-  const minSpacing = FEE_RATE * 2 * 2.5;
-  let rangeMultiplier: number;
-  if (gridCount <= 6) rangeMultiplier = Math.max(1.8, gridCount * minSpacing * 100);
-  else if (gridCount <= 12) rangeMultiplier = 1.4;
-  else rangeMultiplier = 1.2;
-  rangeMultiplier = Math.round(rangeMultiplier * 10) / 10;
-
-  const maxDrawdown = equity < 100 ? 15 : equity < 500 ? 12 : 10;
-  const trailingStop = equity < 100 ? 3 : equity < 500 ? 2.5 : 2;
-  const maxPosition = equity < 200 ? 50 : 30;
-
-  return { gridCount, amountPerOrder, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
-}
-
 function stepForPrice(price: number): number {
   if (price > 10000) return 0.00001;
   if (price > 100) return 0.001;
@@ -773,12 +740,70 @@ function ceilStep(value: number, step: number): number {
   return Math.ceil(value / step) * step;
 }
 
-function calcMaxAffordable(equity: number, price: number): number {
+function scoreGridConfig(
+  n: number, half: number, price: number, minAmount: number, step: number,
+): { score: number; amount: number } {
+  const ROUNDTRIP_FEE = 0.002;
+  const DAILY_VOL = 0.025;
+  const R = DAILY_VOL * 1.2;
+
+  const perSide = n / 2;
+  let amount = ceilStep(half / (perSide * price), step);
+  if (amount * price * perSide > half * 1.05) amount = minAmount;
+  if (amount < minAmount) return { score: -1, amount: minAmount };
+  if (amount * price * perSide > half * 1.05) return { score: -1, amount: minAmount };
+
+  const orderVal = amount * price;
+  const positions: number[] = [];
+  for (let i = 0; i < perSide; i++) positions.push(((i + 1) / perSide) ** 0.6);
+
+  let daily = 0;
+  for (let i = 0; i < perSide; i++) {
+    const dist = R * positions[i];
+    const spacing = i === 0 ? dist : R * (positions[i] - positions[i - 1]);
+    if (spacing <= ROUNDTRIP_FEE) continue;
+    const profitPerRT = (spacing - ROUNDTRIP_FEE) * orderVal;
+    const rtPerDay = Math.min(3.0, DAILY_VOL / (2 * dist) * 0.5);
+    daily += profitPerRT * rtPerDay;
+  }
+  return { score: daily, amount };
+}
+
+function calcSmartGrid(equity: number, price: number, pairCount: number = 1): SmartGridResult {
   const MIN_NOTIONAL = 5.0;
-  const SAFETY = 0.80;
-  const usable = equity * SAFETY;
-  const half = usable / 2;
-  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, stepForPrice(price));
+  const step = stepForPrice(price);
+  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, step);
+
+  const eqPerPair = equity / Math.max(1, pairCount);
+  const half = eqPerPair * 0.80 / 2;
+
+  let bestN = 4;
+  let bestAmount = minAmount;
+  let bestScore = -1;
+
+  for (let n = 4; n <= 20; n += 2) {
+    const { score, amount } = scoreGridConfig(n, half, price, minAmount, step);
+    if (score > bestScore) {
+      bestScore = score;
+      bestN = n;
+      bestAmount = amount;
+    }
+  }
+
+  const rangeMultiplier = bestN <= 6 ? 1.2 : bestN <= 10 ? 1.0 : 0.8;
+  const maxDrawdown = equity < 100 ? 25 : equity < 500 ? 20 : 15;
+  const trailingStop = equity < 100 ? 5 : equity < 500 ? 4 : 3;
+  const maxPosition = equity < 200 ? 70 : 50;
+
+  return { gridCount: bestN, amountPerOrder: bestAmount, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
+}
+
+function calcMaxAffordable(equity: number, price: number, pairCount: number = 1): number {
+  const MIN_NOTIONAL = 5.0;
+  const eqPerPair = equity / Math.max(1, pairCount);
+  const half = eqPerPair * 0.80 / 2;
+  const step = stepForPrice(price);
+  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, step);
   const costPerSide = minAmount * price;
   const maxPerSide = Math.floor(half / costPerSide);
   return Math.max(2, maxPerSide * 2);
@@ -816,10 +841,16 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
 
   if (!price) return null;
 
+  const pairCount = pairs.length || 1;
   const stufen = [4, 6, 8, 10, 12, 16, 20];
   const fmt = (n: number) => n.toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-  const maxAffordable = equity ? calcMaxAffordable(equity, price) : null;
-  const smart = equity ? calcSmartGrid(equity, price) : null;
+  const maxAffordable = equity ? calcMaxAffordable(equity, price, pairCount) : null;
+  const smart = equity ? calcSmartGrid(equity, price, pairCount) : null;
+
+  const step = stepForPrice(price);
+  const minAmt = ceilStep((5.0 * 1.15) / price, step);
+  const eqPerPair = (equity || 0) / pairCount;
+  const half = eqPerPair * 0.80 / 2;
 
   const handleApplySmart = () => {
     if (!smart) return;
@@ -828,22 +859,12 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
 
   const handleSelectLevel = (n: number) => {
     if (!equity || !price) return;
-    const buyLevels = Math.ceil(n / 2);
-    const half = equity * 0.80 / 2;
-    const minAmt = ceilStep((5.0 * 1.15) / price, stepForPrice(price));
-    const optAmt = ceilStep(half / (buyLevels * price), stepForPrice(price));
-    const amountPerOrder = Math.max(minAmt, optAmt);
-
-    let rangeMultiplier: number;
-    if (n <= 6) rangeMultiplier = 1.8;
-    else if (n <= 12) rangeMultiplier = 1.4;
-    else rangeMultiplier = 1.2;
-
-    const maxDrawdown = equity < 100 ? 15 : equity < 500 ? 12 : 10;
-    const trailingStop = equity < 100 ? 3 : equity < 500 ? 2.5 : 2;
-    const maxPosition = equity < 200 ? 50 : 30;
-
-    onApply({ gridCount: n, amountPerOrder, rangeMultiplier, maxDrawdown, trailingStop, maxPosition });
+    const { amount } = scoreGridConfig(n, half, price, minAmt, step);
+    const rangeMultiplier = n <= 6 ? 1.2 : n <= 10 ? 1.0 : 0.8;
+    const maxDrawdown = equity < 100 ? 25 : equity < 500 ? 20 : 15;
+    const trailingStop = equity < 100 ? 5 : equity < 500 ? 4 : 3;
+    const maxPosition = equity < 200 ? 70 : 50;
+    onApply({ gridCount: n, amountPerOrder: Math.max(minAmt, amount), rangeMultiplier, maxDrawdown, trailingStop, maxPosition });
   };
 
   return (
@@ -883,23 +904,28 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
       )}
 
       {/* Smart Preview */}
-      {smart && smart.gridCount !== gridCount && (
+      {smart && equity && (
         <div className="mb-3 px-3 py-2 rounded-lg text-[11px] border" style={{
           background: "var(--accent-bg)", color: "var(--accent)",
           borderColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
         }}>
-          Smart-Empfehlung: <strong>{smart.gridCount} Level</strong>, {smart.amountPerOrder} {base}/Order, Range ×{smart.rangeMultiplier}
+          {(() => {
+            const { score } = scoreGridConfig(smart.gridCount, half, price, minAmt, step);
+            const pct = eqPerPair > 0 && score > 0 ? (score / eqPerPair * 100).toFixed(2) : "?";
+            return <>Rendite-Optimum: <strong>{smart.gridCount} Level</strong> (~{pct}%/Tag), {smart.amountPerOrder} {base}/Order, Range ×{smart.rangeMultiplier}</>;
+          })()}
         </div>
       )}
 
       {/* Level Grid */}
       <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
         {stufen.map((n) => {
-          const minAmt = ceilStep((5.0 * 1.15) / price, stepForPrice(price));
-          const needed = Math.ceil(n * minAmt * price / 0.80);
+          const needed = Math.ceil(n * minAmt * price / 0.80) * pairCount;
           const affordable = maxAffordable !== null && n <= maxAffordable;
           const isCurrent = n === gridCount;
           const isSmart = smart !== null && n === smart.gridCount && n !== gridCount;
+          const { score } = equity ? scoreGridConfig(n, half, price, minAmt, step) : { score: 0 };
+          const dailyPct = eqPerPair > 0 && score > 0 ? (score / eqPerPair * 100) : 0;
           return (
             <button key={n} onClick={() => affordable && handleSelectLevel(n)} disabled={!affordable}
               className="text-center rounded-lg px-1.5 py-2 transition-all disabled:cursor-not-allowed hover:enabled:scale-105 active:enabled:scale-95"
@@ -910,11 +936,22 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
               }}>
               <p className="text-[11px] font-bold font-mono" style={{ color: isCurrent ? "var(--accent)" : isSmart ? "var(--up)" : "var(--text-primary)" }}>{n}</p>
               <p className="text-[8px] text-[var(--text-quaternary)]">Level</p>
-              <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: affordable ? "var(--up)" : "var(--down)" }}>
-                {fmt(needed)}
-              </p>
-              <p className="text-[7px] text-[var(--text-quaternary)]">USDC</p>
-              {isSmart && <p className="text-[7px] font-bold mt-0.5" style={{ color: "var(--up)" }}>SMART</p>}
+              {affordable && dailyPct > 0 ? (
+                <>
+                  <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: "var(--up)" }}>
+                    ~{dailyPct.toFixed(2)}%
+                  </p>
+                  <p className="text-[7px] text-[var(--text-quaternary)]">pro Tag</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: "var(--down)" }}>
+                    {fmt(needed)}
+                  </p>
+                  <p className="text-[7px] text-[var(--text-quaternary)]">USDC</p>
+                </>
+              )}
+              {isSmart && <p className="text-[7px] font-bold mt-0.5" style={{ color: "var(--up)" }}>BEST</p>}
             </button>
           );
         })}
