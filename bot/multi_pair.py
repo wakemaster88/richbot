@@ -118,12 +118,42 @@ class PairBot:
             base, base_bal.get("free", 0), base_bal.get("used", 0), base_bal.get("total", 0),
         )
 
-        usdt_balance = quote_bal.get("free", 10000)
+        usdt_balance = quote_bal.get("free", 0)
+        base_free = base_bal.get("free", 0)
         dynamic_amount = self.risk.calculate_position_size(usdt_balance, self.current_price, vol)
+
+        market = self.exchange._markets.get(self.pair, {})
+        min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
+        min_amount_for_notional = (min_notional * 1.05) / self.current_price
+        if dynamic_amount * self.current_price < min_notional:
+            dynamic_amount = min_amount_for_notional
+            logger.warning(
+                "%s amount angepasst: %.8f → %.8f (min. Notional %.2f %s)",
+                self.pair, self.config.grid.amount_per_order, dynamic_amount, min_notional, self.quote,
+            )
+
+        grid_count = self.config.grid.grid_count
+        buy_count = grid_count // 2
+        sell_count = grid_count - buy_count
+        max_buy_orders = int(usdt_balance / (dynamic_amount * self.current_price)) if self.current_price > 0 else 0
+        max_sell_orders = int(base_free / dynamic_amount) if dynamic_amount > 0 else 0
+        affordable = max_buy_orders + max_sell_orders
+
+        if affordable < grid_count:
+            old_count = grid_count
+            grid_count = max(2, affordable)
+            self.config.grid.grid_count = grid_count
+            self.grid.grid_count = grid_count
+            logger.warning(
+                "%s Grid reduziert: %d → %d Level (max %d Buy + %d Sell leistbar)",
+                self.pair, old_count, grid_count, min(max_buy_orders, grid_count // 2), min(max_sell_orders, grid_count - grid_count // 2),
+            )
+
         logger.info(
-            "%s Order-Sizing — verfuegbar: %.4f %s, Preis: %.2f, amount_per_order: %.8f %s (≈%.2f %s)",
-            self.pair, usdt_balance, self.quote, self.current_price,
-            dynamic_amount, base, dynamic_amount * self.current_price, self.quote,
+            "%s Order-Sizing — %s: %.4f frei, %s: %.8f frei, amount: %.8f (≈%.2f %s), %d Level, minNotional: %.2f",
+            self.pair, self.quote, usdt_balance, base, base_free,
+            dynamic_amount, dynamic_amount * self.current_price, self.quote,
+            grid_count, min_notional,
         )
 
         self.grid.calculate_grid(self.current_range, self.current_price, dynamic_amount)

@@ -62,7 +62,7 @@
     "refresh_interval": 15
   },
   "logging": {
-    "level": "WARNING",
+    "level": "INFO",
     "file": "logs/richbot.log",
     "max_bytes": 5242880,
     "backup_count": 2
