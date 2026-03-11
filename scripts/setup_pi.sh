@@ -108,14 +108,15 @@ Type=simple
 User=$ACTUAL_USER
 Group=$ACTUAL_USER
 WorkingDirectory=$INSTALL_DIR
+ExecStartPre=/bin/sleep 10
 ExecStart=$VENV_DIR/bin/python main.py --config config_pi.json
-Restart=on-failure
+Restart=always
 RestartSec=30
 StartLimitBurst=5
-StartLimitIntervalSec=300
+StartLimitIntervalSec=600
 
-MemoryMax=512M
-MemoryHigh=384M
+MemoryMax=2G
+MemoryHigh=1536M
 CPUWeight=80
 
 StandardOutput=journal
