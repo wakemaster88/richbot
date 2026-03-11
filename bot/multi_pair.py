@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import os
 import time
 
 import pandas as pd
@@ -818,9 +819,27 @@ class MultiPairBot:
                 self.cloud.update_status("running", self.config.pairs, metrics)
             return {"updated": updated}
 
+        async def cmd_update_software(payload):
+            import subprocess
+            script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "auto_update.sh")
+            if not os.path.isfile(script):
+                return {"error": "auto_update.sh nicht gefunden"}
+            install_dir = os.path.dirname(os.path.dirname(__file__))
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["bash", script, install_dir],
+                    capture_output=True, text=True, timeout=90,
+                )
+                logger.info("Software-Update ausgefuehrt: %s", result.stdout.strip()[-200:])
+                return {"stdout": result.stdout[-500:], "stderr": result.stderr[-200:], "code": result.returncode}
+            except Exception as e:
+                return {"error": str(e)}
+
         self.cloud.on_command("stop", cmd_stop)
         self.cloud.on_command("resume", cmd_resume)
         self.cloud.on_command("pause", cmd_pause)
         self.cloud.on_command("status", cmd_status)
         self.cloud.on_command("performance", cmd_performance)
         self.cloud.on_command("update_config", cmd_update_config)
+        self.cloud.on_command("update_software", cmd_update_software)

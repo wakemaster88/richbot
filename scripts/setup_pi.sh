@@ -140,7 +140,7 @@ EnvironmentFile=-$INSTALL_DIR/.env
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=$INSTALL_DIR/data $INSTALL_DIR/logs $INSTALL_DIR/models
+ReadWritePaths=$INSTALL_DIR/data $INSTALL_DIR/logs $INSTALL_DIR/models $INSTALL_DIR/.git
 
 [Install]
 WantedBy=multi-user.target
@@ -149,8 +149,43 @@ systemctl daemon-reload
 systemctl enable richbot.service
 echo "  Service installed (start with: sudo systemctl start richbot)"
 
+# --- Auto-Update Timer ---
+echo "[8/9] Installing auto-update timer..."
+chmod +x "$INSTALL_DIR/scripts/auto_update.sh"
+
+cat > /etc/systemd/system/richbot-update.service << UPDEOF
+[Unit]
+Description=RichBot Auto-Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=$INSTALL_DIR/scripts/auto_update.sh $INSTALL_DIR
+TimeoutStartSec=120
+UPDEOF
+
+cat > /etc/systemd/system/richbot-update.timer << TMREOF
+[Unit]
+Description=RichBot Auto-Update Timer (alle 5 Minuten)
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TMREOF
+
+systemctl daemon-reload
+systemctl enable richbot-update.timer
+systemctl start richbot-update.timer
+echo "  Auto-Update Timer installiert (prueft alle 5 Min. auf Updates)"
+
 # --- Kernel Tuning ---
-echo "[8/8] Applying kernel tuning..."
+echo "[9/9] Applying kernel tuning..."
 SYSCTL_CONF="/etc/sysctl.d/99-richbot.conf"
 cat > "$SYSCTL_CONF" << 'SYSCTL'
 # Reduce swappiness (prefer RAM over swap)

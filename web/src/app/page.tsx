@@ -538,7 +538,7 @@ function Steuerung({ status, commands, onCommand }: {
   const laeuft = status === "running";
   const gestoppt = status === "stopped" || status === "paused";
   const stLabels: Record<string, string> = { completed: "OK", failed: "Fehler", pending: "..." };
-  const labels: Record<string, string> = { stop: "Stoppen", resume: "Fortsetzen", pause: "Pausieren", status: "Status", performance: "Performance", update_config: "Config" };
+  const labels: Record<string, string> = { stop: "Stoppen", resume: "Fortsetzen", pause: "Pausieren", status: "Status", performance: "Performance", update_config: "Config", update_software: "Update" };
 
   const btn = (t: string, lbl: string, col: string) => (
     <button key={t} onClick={() => onCommand(t)}
@@ -554,6 +554,7 @@ function Steuerung({ status, commands, onCommand }: {
         {laeuft && <>{btn("pause", "Pausieren", "var(--warn)")}{btn("stop", "Stoppen", "var(--down)")}</>}
         {gestoppt && btn("resume", "Fortsetzen", "var(--up)")}
         {btn("status", "Status", "var(--accent)")}
+        {btn("update_software", "Update", "var(--cyan)")}
       </div>
       {commands.length > 0 && (
         <div className="space-y-1 max-h-28 overflow-y-auto">
