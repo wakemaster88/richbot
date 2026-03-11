@@ -102,7 +102,10 @@ class PairBot:
         )
 
         vol = self.risk.calculate_volatility(df["close"].values)
-        balance = await self.exchange.async_fetch_balance()
+        try:
+            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+        except Exception:
+            balance = await self.exchange.async_fetch_balance()
         usdt_balance = balance.get(self.quote, {}).get("free", 10000)
         dynamic_amount = self.risk.calculate_position_size(usdt_balance, self.current_price, vol)
 
@@ -211,7 +214,10 @@ class PairBot:
     async def update_equity(self):
         """Update equity tracking."""
         try:
-            balance = await self.exchange.async_fetch_balance()
+            try:
+                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+            except Exception:
+                balance = await self.exchange.async_fetch_balance()
             usdt = balance.get(self.quote, {}).get("total", 0)
             self.tracker.update_equity(self.pair, usdt)
 

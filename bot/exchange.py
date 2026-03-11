@@ -124,6 +124,33 @@ class Exchange:
             "info": data,
         }
 
+    def fetch_account_balances(self) -> dict[str, dict[str, float]]:
+        """Fetch balances directly via HTTP (no ccxt overhead)."""
+        import hmac, hashlib, time as _time, json as _json
+        from urllib.request import Request, urlopen
+
+        ts = int(_time.time() * 1000)
+        query = f"timestamp={ts}"
+        sig = hmac.new(
+            self.config.api_secret.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        url = f"https://api.binance.com/api/v3/account?{query}&signature={sig}"
+        req = Request(url, headers={"X-MBX-APIKEY": self.config.api_key})
+        resp = urlopen(req, timeout=10)
+        data = _json.loads(resp.read().decode())
+
+        balances: dict[str, dict[str, float]] = {}
+        for b in data.get("balances", []):
+            free = float(b["free"])
+            locked = float(b["locked"])
+            if free > 0 or locked > 0:
+                balances[b["asset"]] = {
+                    "free": free,
+                    "used": locked,
+                    "total": free + locked,
+                }
+        return balances
+
     @property
     def sync(self) -> ccxt.Exchange:
         if self._sync is None:
