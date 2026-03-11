@@ -48,11 +48,11 @@ export async function POST(request: NextRequest) {
       const chatId = await getSecret("TELEGRAM_CHAT_ID");
       if (!token || !chatId) return NextResponse.json({ error: "Token oder Chat-ID fehlt" }, { status: 400 });
 
-      const text = "✅ *RichBot Telegram-Test*\n\nVerbindung erfolgreich\\! Benachrichtigungen sind aktiv\\.";
+      const text = "✅ <b>RichBot Telegram-Test</b>\n\nVerbindung erfolgreich! Benachrichtigungen sind aktiv.";
       const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "MarkdownV2" }),
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
       });
       const data = await res.json();
 
