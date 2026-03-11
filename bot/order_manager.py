@@ -48,6 +48,13 @@ class OrderManager:
         """Register a callback for fill events: callback(managed_order)."""
         self._fill_callbacks.append(callback)
 
+    @staticmethod
+    def create_managed(order_id: str, symbol: str, level: GridLevel) -> ManagedOrder:
+        return ManagedOrder(
+            order_id=order_id, symbol=symbol, side=level.side,
+            price=level.price, amount=level.amount, grid_level=level,
+        )
+
     async def place_grid_orders(self, symbol: str) -> list[ManagedOrder]:
         """Place all pending grid orders."""
         can_trade, reason = self.risk.can_trade()

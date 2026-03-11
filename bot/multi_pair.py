@@ -593,7 +593,31 @@ class MultiPairBot:
                 try:
                     ticker = await self.exchange.async_fetch_ticker(pair)
                     await bot.update_tick(ticker["last"])
-                    await bot.order_mgr.check_fills(pair)
+
+                    filled = await bot.order_mgr.check_fills(pair)
+                    for managed in filled:
+                        opposite = bot.grid.get_opposite_level(managed.grid_level)
+                        if opposite:
+                            try:
+                                if opposite.side == "buy":
+                                    order = await self.exchange.async_create_limit_buy(
+                                        pair, opposite.amount, opposite.price)
+                                else:
+                                    order = await self.exchange.async_create_limit_sell(
+                                        pair, opposite.amount, opposite.price)
+                                opposite.order_id = order["id"]
+                                bot.order_mgr.orders[order["id"]] = OrderManager.create_managed(
+                                    order["id"], pair, opposite)
+                                bot.risk.add_trailing_stop(opposite.level_id, opposite.side, opposite.price)
+                                logger.info("Gegenseite platziert: %s %s @ %.2f", opposite.side, pair, opposite.price)
+                            except Exception as e:
+                                logger.warning("Gegenseite fehlgeschlagen: %s %s @ %.2f: %s",
+                                               opposite.side, pair, opposite.price, e)
+
+                    unplaced = bot.grid.get_levels_to_place()
+                    if unplaced:
+                        await bot.order_mgr.place_grid_orders(pair)
+
                 except Exception as e:
                     logger.error("Poll error for %s: %s", pair, e)
             await asyncio.sleep(5)

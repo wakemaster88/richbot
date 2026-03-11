@@ -154,8 +154,9 @@ function Zahl({ label, value, onChange, step, min, max, hint }: {
   label: string; value: number | undefined; onChange: (v: number) => void;
   step?: number; min?: number; max?: number; hint?: string;
 }) {
-  const [local, setLocal] = useState(value?.toString() ?? "");
-  useEffect(() => { setLocal(value?.toString() ?? ""); }, [value]);
+  const fmt = (v: number | undefined) => v != null ? parseFloat(v.toPrecision(10)).toString() : "";
+  const [local, setLocal] = useState(fmt(value));
+  useEffect(() => { setLocal(fmt(value)); }, [value]);
 
   return (
     <div className="space-y-1.5">
@@ -912,7 +913,7 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
           {(() => {
             const { score } = scoreGridConfig(smart.gridCount, half, price, minAmt, step);
             const pct = eqPerPair > 0 && score > 0 ? (score / eqPerPair * 100).toFixed(2) : "?";
-            return <>Rendite-Optimum: <strong>{smart.gridCount} Level</strong> (~{pct}%/Tag), {smart.amountPerOrder} {base}/Order, Range ×{smart.rangeMultiplier}</>;
+            return <>Rendite-Optimum: <strong>{smart.gridCount} Level</strong> (~{pct}%/Tag), {parseFloat(smart.amountPerOrder.toPrecision(6))} {base}/Order, Range ×{smart.rangeMultiplier}</>;
           })()}
         </div>
       )}
