@@ -56,6 +56,7 @@ class PairBot:
         self.last_prediction: dict | None = None
         self._running = False
 
+        self.quote = pair.split("/")[1] if "/" in pair else "USDT"
         self.order_mgr.on_fill(self._on_fill)
 
     def _on_fill(self, managed_order):
@@ -102,7 +103,7 @@ class PairBot:
 
         vol = self.risk.calculate_volatility(df["close"].values)
         balance = await self.exchange.async_fetch_balance()
-        usdt_balance = balance.get("USDT", {}).get("free", 10000)
+        usdt_balance = balance.get(self.quote, {}).get("free", 10000)
         dynamic_amount = self.risk.calculate_position_size(usdt_balance, self.current_price, vol)
 
         self.grid.calculate_grid(self.current_range, self.current_price, dynamic_amount)
@@ -158,7 +159,7 @@ class PairBot:
                     vol = 0.02
 
                 balance = await self.exchange.async_fetch_balance()
-                usdt = balance.get("USDT", {}).get("free", 10000)
+                usdt = balance.get(self.quote, {}).get("free", 10000)
                 dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
 
                 self.grid.trail_grid(breakout, price, new_range, dynamic_amount)
@@ -211,7 +212,7 @@ class PairBot:
         """Update equity tracking."""
         try:
             balance = await self.exchange.async_fetch_balance()
-            usdt = balance.get("USDT", {}).get("total", 0)
+            usdt = balance.get(self.quote, {}).get("total", 0)
             self.tracker.update_equity(self.pair, usdt)
 
             if self.cloud and self.cloud.connected:
@@ -482,7 +483,7 @@ class MultiPairBot:
 
                             vol = self.risk.calculate_volatility(df["close"].values)
                             balance = await self.exchange.async_fetch_balance()
-                            usdt = balance.get("USDT", {}).get("free", 10000)
+                            usdt = balance.get(bot.quote, {}).get("free", 10000)
                             dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
 
                             bot.grid.calculate_grid(new_range, price, dynamic_amount)
