@@ -535,10 +535,11 @@ function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: st
 function Steuerung({ status, commands, onCommand }: {
   status: string; commands: CommandRecord[]; onCommand: (t: string) => void;
 }) {
+  const [logLoading, setLogLoading] = useState(false);
   const laeuft = status === "running";
   const gestoppt = status === "stopped" || status === "paused";
   const stLabels: Record<string, string> = { completed: "OK", failed: "Fehler", pending: "..." };
-  const labels: Record<string, string> = { stop: "Stoppen", resume: "Fortsetzen", pause: "Pausieren", status: "Status", performance: "Performance", update_config: "Config", update_software: "Update" };
+  const labels: Record<string, string> = { stop: "Stoppen", resume: "Fortsetzen", pause: "Pausieren", status: "Status", performance: "Performance", update_config: "Config", update_software: "Update", fetch_logs: "Logs" };
 
   const btn = (t: string, lbl: string, col: string) => (
     <button key={t} onClick={() => onCommand(t)}
@@ -546,6 +547,40 @@ function Steuerung({ status, commands, onCommand }: {
       style={{ background: `color-mix(in srgb, ${col} 10%, transparent)`, color: col, border: `1px solid color-mix(in srgb, ${col} 15%, transparent)` }}
     >{lbl}</button>
   );
+
+  const downloadLogs = async () => {
+    setLogLoading(true);
+    try {
+      const res = await fetch("/api/commands", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "fetch_logs" }),
+      });
+      if (!res.ok) { setLogLoading(false); return; }
+      const cmd = await res.json();
+      const cmdId = cmd.id;
+
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const check = await fetch(`/api/commands?limit=1`, { cache: "no-store" });
+        const list = await check.json();
+        const found = (list as CommandRecord[]).find((c: CommandRecord) => c.id === cmdId);
+        if (!found || found.status === "pending") continue;
+        if (found.status === "completed" && found.result) {
+          const logs = (found.result as { logs?: string }).logs || "Keine Logs";
+          const blob = new Blob([logs], { type: "text/plain" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `richbot-logs-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, "-")}.txt`;
+          a.click();
+          URL.revokeObjectURL(url);
+          break;
+        }
+        if (found.status === "failed") break;
+      }
+    } catch { /* ignore */ }
+    setLogLoading(false);
+  };
 
   return (
     <div className="card p-4 sm:p-5 h-full">
@@ -555,6 +590,10 @@ function Steuerung({ status, commands, onCommand }: {
         {gestoppt && btn("resume", "Fortsetzen", "var(--up)")}
         {btn("status", "Status", "var(--accent)")}
         {btn("update_software", "Update", "var(--cyan)")}
+        <button onClick={downloadLogs} disabled={logLoading}
+          className="px-3 py-2 rounded-lg text-[10px] font-semibold transition-all active:scale-95 disabled:opacity-50"
+          style={{ background: "color-mix(in srgb, var(--text-secondary) 10%, transparent)", color: "var(--text-secondary)", border: "1px solid color-mix(in srgb, var(--text-secondary) 15%, transparent)" }}
+        >{logLoading ? "Lade..." : "Logs"}</button>
       </div>
       {commands.length > 0 && (
         <div className="space-y-1 max-h-28 overflow-y-auto">

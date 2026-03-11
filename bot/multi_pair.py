@@ -919,6 +919,20 @@ class MultiPairBot:
             except Exception as e:
                 return {"error": str(e)}
 
+        async def cmd_fetch_logs(payload):
+            import subprocess
+            lines = payload.get("lines", 200)
+            lines = max(50, min(lines, 2000))
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["journalctl", "-u", "richbot", "--no-pager", "-n", str(lines)],
+                    capture_output=True, text=True, timeout=15,
+                )
+                return {"logs": result.stdout, "lines": lines}
+            except Exception as e:
+                return {"error": str(e)}
+
         self.cloud.on_command("stop", cmd_stop)
         self.cloud.on_command("resume", cmd_resume)
         self.cloud.on_command("pause", cmd_pause)
@@ -926,3 +940,4 @@ class MultiPairBot:
         self.cloud.on_command("performance", cmd_performance)
         self.cloud.on_command("update_config", cmd_update_config)
         self.cloud.on_command("update_software", cmd_update_software)
+        self.cloud.on_command("fetch_logs", cmd_fetch_logs)
