@@ -16,7 +16,7 @@ interface BotStatus {
 interface OpenOrder { side: string; price: number; amount: number; id: string; }
 interface PairMetrics {
   pair: string; price: number; range: string; range_source: string;
-  grid_levels: number; active_orders: number; filled_orders: number;
+  grid_levels: number; grid_configured?: number; active_orders: number; filled_orders: number;
   total_pnl: number; realized_pnl: number; unrealized_pnl: number;
   trade_count: number; max_drawdown_pct: number; sharpe_ratio: number;
   current_equity: number; buy_count?: number; sell_count?: number;
@@ -192,7 +192,7 @@ function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; 
 
       {/* Stats Grid */}
       <div className="grid grid-cols-3 gap-2 mb-3">
-        <MiniStat label="Grid" wert={`${m.active_orders}/${m.grid_levels}`} />
+        <MiniStat label="Grid" wert={`${m.active_orders}/${m.grid_configured || m.grid_levels}`} />
         <MiniStat label="Trades" wert={`${m.trade_count}`} />
         <MiniStat label="Drawdown" wert={`${fmt(m.max_drawdown_pct)}%`} farbe="text-[var(--warn)]" />
       </div>

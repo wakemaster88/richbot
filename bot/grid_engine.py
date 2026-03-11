@@ -78,7 +78,7 @@ class GridState:
 class GridEngine:
     """Computes and manages grid levels with trailing/infinity support."""
 
-    MIN_SPACING_VS_FEE = 2.5  # spacing must be >= 2.5x round-trip fee
+    MIN_SPACING_VS_FEE = 1.5  # spacing must be >= 1.5x round-trip fee
     FEE_RATE = 0.001
 
     def __init__(self, grid_count: int = 20, spacing_percent: float = 0.5,

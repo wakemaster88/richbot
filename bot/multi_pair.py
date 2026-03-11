@@ -314,6 +314,7 @@ class PairBot:
             "range": f"[{self.current_range.lower:.2f}, {self.current_range.upper:.2f}]" if self.current_range else "N/A",
             "range_source": self.current_range.source if self.current_range else "N/A",
             "grid_levels": len(self.grid.state.levels),
+            "grid_configured": self.grid.grid_count,
             "active_orders": len(open_orders),
             "filled_orders": len(self.order_mgr.get_filled_orders(self.pair)),
             "open_orders": orders_list,
@@ -743,10 +744,17 @@ class MultiPairBot:
                             await bot.order_mgr.cancel_all(pair)
                             bot.grid.calculate_grid(bot.current_range, bot.current_price, self.config.grid.amount_per_order)
                             await bot.order_mgr.place_grid_orders(pair)
-                            logger.info("%s Grid neu berechnet: %d Level, %.8f pro Order",
-                                        pair, self.config.grid.grid_count, self.config.grid.amount_per_order)
+                            actual = len(bot.grid.state.levels)
+                            logger.info("%s Grid neu berechnet: %d/%d Level (angefragt/tatsaechlich), %.8f pro Order",
+                                        pair, self.config.grid.grid_count, actual, self.config.grid.amount_per_order)
+                            if actual < self.config.grid.grid_count:
+                                logger.warning("%s Nur %d von %d Level moeglich (Range zu eng fuer Fee-Spacing)",
+                                               pair, actual, self.config.grid.grid_count)
                         except Exception as e:
                             logger.error("Grid re-init failed for %s: %s", pair, e)
+            if self.cloud.connected:
+                metrics = {p: b.get_status() for p, b in self.pair_bots.items()}
+                self.cloud.update_status("running", self.config.pairs, metrics)
             return {"updated": updated}
 
         self.cloud.on_command("stop", cmd_stop)
