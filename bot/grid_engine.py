@@ -155,9 +155,11 @@ class GridEngine:
         self.state.levels = levels
         self.state.invalidate()
 
+        actual_buys = sum(1 for l in levels if l.side == "buy")
+        actual_sells = sum(1 for l in levels if l.side == "sell")
         logger.info(
             "Grid calculated: %d levels (buy=%d, sell=%d) in [%.2f, %.2f]",
-            len(levels), buy_count, sell_count, range_result.lower, range_result.upper,
+            len(levels), actual_buys, actual_sells, range_result.lower, range_result.upper,
         )
         return levels
 

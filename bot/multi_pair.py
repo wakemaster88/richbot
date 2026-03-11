@@ -218,21 +218,7 @@ class PairBot:
 
                 new_range = shift_range(self.current_range, breakout)
                 self.current_range = new_range
-
-                try:
-                    ohlcv = await self.exchange.async_fetch_ohlcv(
-                        self.pair, timeframe=self.config.atr.timeframe, limit=50
-                    )
-                    closes = [c[4] for c in ohlcv]
-                    vol = self.risk.calculate_volatility(closes)
-                except Exception:
-                    vol = 0.02
-
-                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
-                usdt = balance.get(self.quote, {}).get("free", 10000)
-                dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
-
-                self.grid.trail_grid(breakout, price, new_range, dynamic_amount)
+                self.grid.trail_grid(breakout, price, new_range, self.pair_amount)
                 await self.order_mgr.place_grid_orders(self.pair)
 
                 await self.telegram.alert_range_shift(
