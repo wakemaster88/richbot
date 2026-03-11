@@ -54,38 +54,31 @@ function generateDemoPnl(): { zeit: string; pnl: number }[] {
 }
 
 function generateDemoTrades(): Trade[] {
-  const pairs = ["BTC/USDT", "ETH/USDT"];
+  const pairs = ["BTC/USDC"];
   const now = Date.now();
   return Array.from({ length: 20 }, (_, i) => {
     const side = Math.random() > 0.5 ? "buy" : "sell";
     const pair = pairs[Math.floor(Math.random() * pairs.length)];
-    const price = pair.startsWith("BTC") ? 87000 + (Math.random() - 0.5) * 2000 : 3200 + (Math.random() - 0.5) * 200;
+    const price = 87000 + (Math.random() - 0.5) * 2000;
     return {
       id: `demo-${i}`, timestamp: new Date(now - i * 180000 * Math.random() * 5).toISOString(),
       pair, side, price: parseFloat(price.toFixed(2)),
-      amount: parseFloat((Math.random() * 0.01 + 0.001).toFixed(6)),
-      pnl: parseFloat(((Math.random() - 0.4) * 3).toFixed(4)),
+      amount: parseFloat((Math.random() * 0.0005 + 0.0001).toFixed(8)),
+      pnl: parseFloat(((Math.random() - 0.4) * 0.5).toFixed(4)),
     };
   }).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 }
 
 const DEMO_STATUS: BotStatus = {
   id: "demo", botId: "richbot-pi", status: "running",
-  lastHeartbeat: new Date().toISOString(), pairs: ["BTC/USDT", "ETH/USDT"],
+  lastHeartbeat: new Date().toISOString(), pairs: ["BTC/USDC"],
   pairStatuses: {
-    "BTC/USDT": {
-      pair: "BTC/USDT", price: 87432.50, range: "[85200.00, 89800.00]", range_source: "ATR+LSTM",
+    "BTC/USDC": {
+      pair: "BTC/USDC", price: 87432.50, range: "[85200.00, 89800.00]", range_source: "ATR+LSTM",
       grid_levels: 20, active_orders: 16, filled_orders: 4, total_pnl: 42.8731,
       realized_pnl: 38.2100, unrealized_pnl: 4.6631, trade_count: 847,
       max_drawdown_pct: 3.24, sharpe_ratio: 1.87, current_equity: 10042.87,
       buy_count: 423, sell_count: 424, annualized_return_pct: 34.2, fees_paid: 12.47,
-    },
-    "ETH/USDT": {
-      pair: "ETH/USDT", price: 3247.80, range: "[3100.00, 3420.00]", range_source: "ATR",
-      grid_levels: 16, active_orders: 12, filled_orders: 4, total_pnl: 18.4520,
-      realized_pnl: 15.8900, unrealized_pnl: 2.5620, trade_count: 562,
-      max_drawdown_pct: 2.18, sharpe_ratio: 2.12, current_equity: 5018.45,
-      buy_count: 280, sell_count: 282, annualized_return_pct: 28.6, fees_paid: 8.21,
     },
   },
   startedAt: new Date(Date.now() - 3 * 86400000).toISOString(), version: "2.0",
@@ -132,6 +125,15 @@ function fmt(n: number, d = 2): string {
   return n.toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
+function fmtBtc(n: number): string {
+  return n.toLocaleString("de-DE", { minimumFractionDigits: 8, maximumFractionDigits: 8 });
+}
+
+function fmtSats(n: number): string {
+  const sats = Math.round(n * 1e8);
+  return sats.toLocaleString("de-DE") + " sat";
+}
+
 // -- Components --
 
 function StatusBadge({ status, hb }: { status: string; hb: string }) {
@@ -163,13 +165,13 @@ function Stat({ label, wert, sub, farbe, klein }: {
   );
 }
 
-function PairKarte({ pair, m, quote = "USDT" }: { pair: string; m: PairMetrics; quote?: string }) {
+function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; quote?: string }) {
   const up = m.total_pnl >= 0;
   const rows = [
-    { l: "Preis", v: fmt(m.price), c: "" },
+    { l: `Preis (${quote})`, v: fmt(m.price), c: "" },
     { l: "Grid", v: `${m.active_orders}/${m.grid_levels}`, c: "" },
     { l: "Trades", v: `${m.trade_count}`, c: "" },
-    { l: "PnL", v: `${up ? "+" : ""}${fmt(m.total_pnl, 4)}`, c: up ? "text-[var(--up)]" : "text-[var(--down)]" },
+    { l: `PnL (${quote})`, v: `${up ? "+" : ""}${fmt(m.total_pnl, 4)}`, c: up ? "text-[var(--up)]" : "text-[var(--down)]" },
     { l: "Drawdown", v: `${fmt(m.max_drawdown_pct)}%`, c: "text-[var(--warn)]" },
     { l: "Sharpe", v: fmt(m.sharpe_ratio), c: m.sharpe_ratio > 1.5 ? "text-[var(--up)]" : "" },
   ];
@@ -187,7 +189,7 @@ function PairKarte({ pair, m, quote = "USDT" }: { pair: string; m: PairMetrics; 
           </div>
         </div>
         <div className="text-right">
-          <p className="text-lg font-bold font-mono">{fmt(m.price)}</p>
+          <p className="text-lg font-bold font-mono">{fmt(m.price)} <span className="text-xs text-[var(--text-tertiary)]">{quote}</span></p>
           <p className={`text-xs font-mono font-semibold ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
             {up ? "+" : ""}{fmt(m.total_pnl, 4)} {quote}
           </p>
@@ -212,7 +214,7 @@ function PairKarte({ pair, m, quote = "USDT" }: { pair: string; m: PairMetrics; 
   );
 }
 
-function EquityChart({ data, quote = "USDT" }: { data: EquityPoint[]; quote?: string }) {
+function EquityChart({ data, quote = "USDC" }: { data: EquityPoint[]; quote?: string }) {
   const cd = data.map((d) => ({
     t: new Date(d.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
     v: d.equity,
@@ -262,7 +264,7 @@ function EquityChart({ data, quote = "USDT" }: { data: EquityPoint[]; quote?: st
   );
 }
 
-function PnlChart({ data, quote = "USDT" }: { data: { zeit: string; pnl: number }[]; quote?: string }) {
+function PnlChart({ data, quote = "USDC" }: { data: { zeit: string; pnl: number }[]; quote?: string }) {
   return (
     <div className="card p-5">
       <h3 className="text-xs text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-medium mb-4">PnL pro Stunde</h3>
@@ -286,7 +288,7 @@ function PnlChart({ data, quote = "USDT" }: { data: { zeit: string; pnl: number 
   );
 }
 
-function TradesTabelle({ trades }: { trades: Trade[] }) {
+function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: string }) {
   if (!trades.length) return <div className="card p-8 text-center text-sm text-[var(--text-tertiary)]">Noch keine Trades</div>;
 
   return (
@@ -314,11 +316,11 @@ function TradesTabelle({ trades }: { trades: Trade[] }) {
                 </span>
               </div>
               <span className="text-sm font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
-                {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)}
+                {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)} {quote}
               </span>
             </div>
             <div className="flex justify-between text-[10px] text-[var(--text-tertiary)]">
-              <span className="font-mono">{fmt(t.price)} · {t.amount.toFixed(6)}</span>
+              <span className="font-mono">{fmt(t.price)} · {fmtSats(t.amount)} <span className="text-[var(--text-quaternary)]">({fmt(t.amount * t.price)} {quote})</span></span>
               <span>{new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
             </div>
           </div>
@@ -334,7 +336,8 @@ function TradesTabelle({ trades }: { trades: Trade[] }) {
               <th className="text-left px-5 py-2.5 font-medium">Paar</th>
               <th className="text-left px-5 py-2.5 font-medium">Typ</th>
               <th className="text-right px-5 py-2.5 font-medium">Preis</th>
-              <th className="text-right px-5 py-2.5 font-medium">Menge</th>
+              <th className="text-right px-5 py-2.5 font-medium">Menge (BTC)</th>
+              <th className="text-right px-5 py-2.5 font-medium">Wert ({quote})</th>
               <th className="text-right px-5 py-2.5 font-medium">PnL</th>
             </tr>
           </thead>
@@ -354,9 +357,13 @@ function TradesTabelle({ trades }: { trades: Trade[] }) {
                   </span>
                 </td>
                 <td className="px-5 py-2.5 text-right font-mono">{fmt(t.price)}</td>
-                <td className="px-5 py-2.5 text-right font-mono text-[var(--text-secondary)]">{t.amount.toFixed(6)}</td>
+                <td className="px-5 py-2.5 text-right font-mono text-[var(--text-secondary)]">
+                  <span>{fmtBtc(t.amount)}</span>
+                  <span className="block text-[10px] text-[var(--text-quaternary)]">{fmtSats(t.amount)}</span>
+                </td>
+                <td className="px-5 py-2.5 text-right font-mono text-[var(--text-secondary)]">{fmt(t.amount * t.price)} {quote}</td>
                 <td className="px-5 py-2.5 text-right font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
-                  {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)}
+                  {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)} {quote}
                 </td>
               </tr>
             ))}
@@ -467,7 +474,7 @@ export default function Dashboard() {
 
   const status = botStatus || DEMO_STATUS;
   const pairs = Object.entries((status.pairStatuses || {}) as Record<string, PairMetrics>);
-  const quoteCcy = status.pairs?.[0]?.split("/")?.[1] || "USDT";
+  const quoteCcy = status.pairs?.[0]?.split("/")?.[1] || "USDC";
   const totalPnl = pairs.reduce((s, [, m]) => s + (m.total_pnl || 0), 0);
   const totalTrades = pairs.reduce((s, [, m]) => s + (m.trade_count || 0), 0);
   const totalEquity = pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
@@ -550,7 +557,7 @@ export default function Dashboard() {
 
       {/* Trades + Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2"><TradesTabelle trades={trades} /></div>
+        <div className="lg:col-span-2"><TradesTabelle trades={trades} quote={quoteCcy} /></div>
         <div><Steuerung status={status.status} commands={commands} onCommand={handleCommand} /></div>
       </div>
     </div>
