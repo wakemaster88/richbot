@@ -106,8 +106,24 @@ class PairBot:
             balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
         except Exception:
             balance = await self.exchange.async_fetch_balance()
-        usdt_balance = balance.get(self.quote, {}).get("free", 10000)
+
+        quote_bal = balance.get(self.quote, {})
+        base = self.pair.split("/")[0]
+        base_bal = balance.get(base, {})
+        logger.info(
+            "%s Balance — %s: free=%.4f, locked=%.4f, total=%.4f | %s: free=%.8f, locked=%.8f, total=%.8f",
+            self.pair,
+            self.quote, quote_bal.get("free", 0), quote_bal.get("used", 0), quote_bal.get("total", 0),
+            base, base_bal.get("free", 0), base_bal.get("used", 0), base_bal.get("total", 0),
+        )
+
+        usdt_balance = quote_bal.get("free", 10000)
         dynamic_amount = self.risk.calculate_position_size(usdt_balance, self.current_price, vol)
+        logger.info(
+            "%s Order-Sizing — verfuegbar: %.4f %s, Preis: %.2f, amount_per_order: %.8f %s (≈%.2f %s)",
+            self.pair, usdt_balance, self.quote, self.current_price,
+            dynamic_amount, base, dynamic_amount * self.current_price, self.quote,
+        )
 
         self.grid.calculate_grid(self.current_range, self.current_price, dynamic_amount)
 
@@ -218,7 +234,17 @@ class PairBot:
                 balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
             except Exception:
                 balance = await self.exchange.async_fetch_balance()
-            usdt = balance.get(self.quote, {}).get("total", 0)
+
+            quote_bal = balance.get(self.quote, {})
+            base = self.pair.split("/")[0]
+            base_bal = balance.get(base, {})
+            usdt = quote_bal.get("total", 0)
+            logger.info(
+                "%s Equity — %s: %.4f | %s: %.8f (≈%.2f %s)",
+                self.pair, self.quote, usdt,
+                base, base_bal.get("total", 0),
+                base_bal.get("total", 0) * (self.current_price or 0), self.quote,
+            )
             self.tracker.update_equity(self.pair, usdt)
 
             if self.cloud and self.cloud.connected:
