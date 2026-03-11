@@ -739,6 +739,44 @@ class MultiPairBot:
             logger.info("Config angewendet: %s", updated)
         return updated
 
+    async def _sync_pairs(self):
+        """Add new pairs and remove old ones dynamically."""
+        current = set(self.pair_bots.keys())
+        desired = set(self.config.pairs)
+        to_add = desired - current
+        to_remove = current - desired
+
+        for pair in to_remove:
+            bot = self.pair_bots.pop(pair, None)
+            if bot:
+                try:
+                    await bot.order_mgr.cancel_all(pair)
+                except Exception as e:
+                    logger.warning("Fehler beim Entfernen von %s: %s", pair, e)
+                logger.info("%s entfernt", pair)
+
+        if to_add:
+            try:
+                await self.exchange.preload_markets(list(to_add))
+            except Exception as e:
+                logger.error("Markets laden fuer %s fehlgeschlagen: %s", to_add, e)
+                return
+
+            for pair in to_add:
+                ml = None
+                if self.config.ml.enabled:
+                    from bot.config import PiConfig
+                    pi_cfg = self.config.pi if self.config.is_pi else PiConfig()
+                    ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
+                bot = PairBot(pair, self.config, self.exchange, self.risk,
+                              self.tracker, self.telegram, ml, self.cloud)
+                self.pair_bots[pair] = bot
+                try:
+                    await bot.initialize()
+                    logger.info("%s hinzugefuegt und initialisiert", pair)
+                except Exception as e:
+                    logger.error("Initialisierung von %s fehlgeschlagen: %s", pair, e)
+
     async def stop(self):
         self._running = False
         for pair, bot in self.pair_bots.items():
@@ -789,8 +827,12 @@ class MultiPairBot:
 
         async def cmd_update_config(payload):
             updated = self._apply_config(payload)
+
+            if "pairs" in updated:
+                await self._sync_pairs()
+
             if any(k.startswith("grid.") for k in updated):
-                for pair, bot in self.pair_bots.items():
+                for pair, bot in list(self.pair_bots.items()):
                     bot.pair_grid_count = self.config.grid.grid_count
                     bot.pair_amount = self.config.grid.amount_per_order
                     bot.grid = GridEngine(
