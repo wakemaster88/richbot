@@ -719,6 +719,89 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
   );
 }
 
+/* ---- Grid Capital Info ---- */
+
+function GridKapitalInfo({ gridCount, amountPerOrder }: { gridCount: number; amountPerOrder: number }) {
+  const [price, setPrice] = useState<number | null>(null);
+  const [equity, setEquity] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDC")
+      .then((r) => r.json())
+      .then((d) => setPrice(parseFloat(d.price)))
+      .catch(() => {});
+    fetch("/api/status", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.dbConnected && d?.pairStatuses) {
+          const first = Object.values(d.pairStatuses)[0] as { current_equity?: number } | undefined;
+          if (first?.current_equity) setEquity(first.current_equity);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  if (!price) return null;
+
+  const costPerLevel = amountPerOrder * price;
+  const minNotional = 5.0;
+  const effectiveCost = Math.max(costPerLevel, minNotional * 1.15);
+
+  const stufen = [4, 6, 8, 10, 12, 16, 20];
+  const fmt = (n: number) => n.toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+  const maxAffordable = equity ? Math.floor(equity / effectiveCost) : null;
+
+  return (
+    <div className="mt-4 rounded-xl p-3.5 border border-[var(--border-subtle)]" style={{ background: "var(--bg-secondary)" }}>
+      <div className="flex items-center gap-2 mb-2.5">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />
+        </svg>
+        <span className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-semibold">Kapital pro Grid-Level</span>
+      </div>
+
+      {equity !== null && maxAffordable !== null && (
+        <div className="mb-3 px-3 py-2 rounded-lg text-[11px] font-medium" style={{
+          background: maxAffordable >= gridCount ? "var(--up-bg)" : "var(--warn-bg)",
+          color: maxAffordable >= gridCount ? "var(--up)" : "var(--warn)",
+        }}>
+          {maxAffordable >= gridCount
+            ? `Dein Kapital (${fmt(equity)} USDC) reicht fuer ${gridCount} Level`
+            : `Dein Kapital (${fmt(equity)} USDC) reicht fuer max. ${Math.max(2, maxAffordable)} Level — ${gridCount} konfiguriert`
+          }
+        </div>
+      )}
+
+      <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+        {stufen.map((n) => {
+          const needed = Math.ceil(n * effectiveCost);
+          const affordable = equity !== null && equity >= needed;
+          const isCurrent = n === gridCount;
+          return (
+            <div key={n} className="text-center rounded-lg px-1.5 py-2 transition-all" style={{
+              background: isCurrent ? "var(--accent-bg)" : "var(--bg-primary)",
+              border: `1px solid ${isCurrent ? "var(--accent)" : "var(--border-subtle)"}`,
+              opacity: affordable === false ? 0.4 : 1,
+            }}>
+              <p className="text-[11px] font-bold font-mono" style={{ color: isCurrent ? "var(--accent)" : "var(--text-primary)" }}>{n}</p>
+              <p className="text-[8px] text-[var(--text-quaternary)]">Level</p>
+              <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: affordable ? "var(--up)" : affordable === false ? "var(--down)" : "var(--text-tertiary)" }}>
+                {fmt(needed)}
+              </p>
+              <p className="text-[7px] text-[var(--text-quaternary)]">USDC</p>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="text-[9px] text-[var(--text-quaternary)] mt-2.5">
+        Berechnung: {amountPerOrder} BTC × {fmt(price)} USDC × Anzahl Level. Gruen = mit deinem Kapital moeglich.
+      </p>
+    </div>
+  );
+}
+
 /* ---- Install Guide ---- */
 
 const INSTALL_STEPS = [
@@ -1174,6 +1257,7 @@ export default function SettingsPage() {
             <Zahl label="Trail-Schwelle %" value={config.grid?.trail_trigger_percent} onChange={(v) => update("grid.trail_trigger_percent", v)} step={0.1} min={0.5} max={10} hint="Ausbruch-Schwelle fur Grid-Verschiebung" />
           </div>
           <Schalter label="Infinity-Modus" value={config.grid?.infinity_mode} onChange={(v) => update("grid.infinity_mode", v)} hint="Grid verschiebt sich bei Ausbruch statt zu stoppen" />
+          <GridKapitalInfo gridCount={config.grid?.grid_count || 4} amountPerOrder={config.grid?.amount_per_order || 0.0001} />
         </Sektion>
 
         {/* ATR */}
