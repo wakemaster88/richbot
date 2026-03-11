@@ -731,19 +731,57 @@ interface SmartGridResult {
 }
 
 function calcSmartGrid(equity: number, price: number): SmartGridResult {
-  const minNotional = 5.0;
-  const minAmount = Math.ceil((minNotional * 1.2) / price * 100000) / 100000;
-  const costPerLevel = minAmount * price;
-  const reserve = 0.85;
-  const maxLevels = Math.floor((equity * reserve) / costPerLevel);
-  const gridCount = Math.max(4, Math.min(maxLevels, 20));
+  const MIN_NOTIONAL = 5.0;
+  const FEE_RATE = 0.001;
+  const SAFETY = 0.80;
 
-  const rangeMultiplier = gridCount <= 6 ? 1.5 : gridCount <= 10 ? 1.2 : 1.0;
-  const maxDrawdown = equity < 50 ? 15 : equity < 200 ? 12 : 10;
-  const trailingStop = equity < 50 ? 3 : equity < 200 ? 2.5 : 2;
-  const maxPosition = equity < 100 ? 50 : 30;
+  const usableEquity = equity * SAFETY;
+  const halfEquity = usableEquity / 2;
 
-  return { gridCount, amountPerOrder: minAmount, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
+  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, stepForPrice(price));
+
+  const maxBuyLevels = Math.floor(halfEquity / (minAmount * price));
+  const maxSellLevels = maxBuyLevels;
+  const maxTotalLevels = maxBuyLevels + maxSellLevels;
+  const gridCount = Math.max(4, Math.min(maxTotalLevels, 20));
+
+  const buyLevels = Math.ceil(gridCount / 2);
+  const optimalAmount = ceilStep(halfEquity / (buyLevels * price), stepForPrice(price));
+  const amountPerOrder = Math.max(minAmount, optimalAmount);
+
+  const minSpacing = FEE_RATE * 2 * 2.5;
+  let rangeMultiplier: number;
+  if (gridCount <= 6) rangeMultiplier = Math.max(1.8, gridCount * minSpacing * 100);
+  else if (gridCount <= 12) rangeMultiplier = 1.4;
+  else rangeMultiplier = 1.2;
+  rangeMultiplier = Math.round(rangeMultiplier * 10) / 10;
+
+  const maxDrawdown = equity < 100 ? 15 : equity < 500 ? 12 : 10;
+  const trailingStop = equity < 100 ? 3 : equity < 500 ? 2.5 : 2;
+  const maxPosition = equity < 200 ? 50 : 30;
+
+  return { gridCount, amountPerOrder, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
+}
+
+function stepForPrice(price: number): number {
+  if (price > 10000) return 0.00001;
+  if (price > 100) return 0.001;
+  return 0.01;
+}
+
+function ceilStep(value: number, step: number): number {
+  return Math.ceil(value / step) * step;
+}
+
+function calcMaxAffordable(equity: number, price: number): number {
+  const MIN_NOTIONAL = 5.0;
+  const SAFETY = 0.80;
+  const usable = equity * SAFETY;
+  const half = usable / 2;
+  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, stepForPrice(price));
+  const costPerSide = minAmount * price;
+  const maxPerSide = Math.floor(half / costPerSide);
+  return Math.max(2, maxPerSide * 2);
 }
 
 function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
@@ -778,12 +816,9 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
 
   if (!price) return null;
 
-  const minNotional = 5.0;
-  const minAmount = Math.ceil((minNotional * 1.2) / price * 100000) / 100000;
-  const effectiveCost = minAmount * price;
   const stufen = [4, 6, 8, 10, 12, 16, 20];
   const fmt = (n: number) => n.toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-  const maxAffordable = equity ? Math.floor((equity * 0.85) / effectiveCost) : null;
+  const maxAffordable = equity ? calcMaxAffordable(equity, price) : null;
   const smart = equity ? calcSmartGrid(equity, price) : null;
 
   const handleApplySmart = () => {
@@ -793,12 +828,22 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
 
   const handleSelectLevel = (n: number) => {
     if (!equity || !price) return;
-    const result = calcSmartGrid(equity, price);
-    result.gridCount = n;
-    if (n > 10) result.rangeMultiplier = 1.0;
-    else if (n > 6) result.rangeMultiplier = 1.2;
-    else result.rangeMultiplier = 1.5;
-    onApply(result);
+    const buyLevels = Math.ceil(n / 2);
+    const half = equity * 0.80 / 2;
+    const minAmt = ceilStep((5.0 * 1.15) / price, stepForPrice(price));
+    const optAmt = ceilStep(half / (buyLevels * price), stepForPrice(price));
+    const amountPerOrder = Math.max(minAmt, optAmt);
+
+    let rangeMultiplier: number;
+    if (n <= 6) rangeMultiplier = 1.8;
+    else if (n <= 12) rangeMultiplier = 1.4;
+    else rangeMultiplier = 1.2;
+
+    const maxDrawdown = equity < 100 ? 15 : equity < 500 ? 12 : 10;
+    const trailingStop = equity < 100 ? 3 : equity < 500 ? 2.5 : 2;
+    const maxPosition = equity < 200 ? 50 : 30;
+
+    onApply({ gridCount: n, amountPerOrder, rangeMultiplier, maxDrawdown, trailingStop, maxPosition });
   };
 
   return (
@@ -850,8 +895,9 @@ function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
       {/* Level Grid */}
       <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
         {stufen.map((n) => {
-          const needed = Math.ceil(n * effectiveCost);
-          const affordable = equity !== null && (equity * 0.85) >= needed;
+          const minAmt = ceilStep((5.0 * 1.15) / price, stepForPrice(price));
+          const needed = Math.ceil(n * minAmt * price / 0.80);
+          const affordable = maxAffordable !== null && n <= maxAffordable;
           const isCurrent = n === gridCount;
           const isSmart = smart !== null && n === smart.gridCount && n !== gridCount;
           return (

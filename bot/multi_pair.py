@@ -650,50 +650,67 @@ class MultiPairBot:
 
     async def _auto_adjust_grid(self):
         """Adjust grid level count based on current balance — runs every ~5 minutes."""
-        for pair, bot in self.pair_bots.items():
+        import math
+
+        for pair, bot in list(self.pair_bots.items()):
             try:
                 balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
                 quote_bal = balance.get(bot.quote, {})
-                base = pair.split("/")[0]
-                base_bal = balance.get(base, {})
-                total_equity = quote_bal.get("total", 0) + base_bal.get("total", 0) * (bot.current_price or 0)
+                base_name = pair.split("/")[0]
+                base_bal = balance.get(base_name, {})
+                price = bot.current_price or 0
 
-                if bot.current_price <= 0 or total_equity <= 0:
+                if price <= 0:
+                    continue
+
+                quote_total = quote_bal.get("total", 0)
+                base_total = base_bal.get("total", 0)
+                total_equity = quote_total + base_total * price
+
+                if total_equity <= 0:
                     continue
 
                 market = self.exchange._markets.get(pair, {})
                 min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
                 step_size = market.get("precision", {}).get("amount", 0.00001)
 
-                import math
-                min_amount = math.ceil((min_notional * 1.2) / bot.current_price / step_size) * step_size
-                cost_per_level = min_amount * bot.current_price
-                max_affordable = int((total_equity * 0.85) / cost_per_level) if cost_per_level > 0 else 4
-                optimal = max(4, min(max_affordable, 20))
+                min_amount = math.ceil((min_notional * 1.15) / price / step_size) * step_size
+
+                usable = total_equity * 0.80
+                half = usable / 2
+                cost_per_side = min_amount * price
+                max_per_side = int(half / cost_per_side) if cost_per_side > 0 else 2
+                max_total = max_per_side * 2
+                optimal = max(4, min(max_total, 20))
+
                 configured = bot.pair_grid_count
 
                 if optimal != configured and abs(optimal - configured) >= 2:
                     old = configured
+                    buy_levels = math.ceil(optimal / 2)
+                    opt_amount = math.ceil(half / (buy_levels * price) / step_size) * step_size
+                    amount = max(min_amount, opt_amount)
+
                     bot.pair_grid_count = optimal
-                    bot.pair_amount = min_amount
+                    bot.pair_amount = amount
 
                     bot.grid = GridEngine(
                         grid_count=optimal,
                         spacing_percent=self.config.grid.spacing_percent,
-                        amount_per_order=min_amount,
+                        amount_per_order=amount,
                         infinity_mode=self.config.grid.infinity_mode,
                         trail_trigger_percent=self.config.grid.trail_trigger_percent,
                     )
                     bot.order_mgr.grid = bot.grid
 
-                    if bot.current_range and bot.current_price:
+                    if bot.current_range and price:
                         await bot.order_mgr.cancel_all(pair)
-                        bot.grid.calculate_grid(bot.current_range, bot.current_price, min_amount)
+                        bot.grid.calculate_grid(bot.current_range, price, amount)
                         await bot.order_mgr.place_grid_orders(pair)
 
                     logger.info(
                         "%s Auto-Grid: %d → %d Level (Kapital: %.2f %s, %.8f %s/Order)",
-                        pair, old, optimal, total_equity, bot.quote, min_amount, bot.base,
+                        pair, old, optimal, total_equity, bot.quote, amount, bot.base,
                     )
             except Exception as e:
                 logger.warning("Auto-grid adjust failed for %s: %s", pair, e)
