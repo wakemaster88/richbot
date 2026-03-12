@@ -2,6 +2,7 @@
 
 Computes optimal grid parameters based on actual balances, prices,
 and exchange constraints. No manual grid_count configuration needed.
+Provides per-side budgets for pyramid order sizing.
 """
 
 from __future__ import annotations
@@ -17,42 +18,55 @@ DAILY_VOL = 0.025
 RESERVE_PCT = 0.15
 
 
+def _pyramid_weights(count: int) -> list[float]:
+    """Pyramid weights: 0.7 (near price) to 1.3 (far from price)."""
+    if count <= 1:
+        return [1.0]
+    return [0.7 + 0.6 * i / (count - 1) for i in range(count)]
+
+
+def _pyramid_weight_sum(count: int) -> float:
+    return sum(_pyramid_weights(count))
+
+
 @dataclass
 class AllocationResult:
     grid_count: int
     buy_count: int
     sell_count: int
-    amount_per_order: float
+    amount_per_order: float  # average/base amount for display
     reserve_usdc: float
     quote_for_trading: float
     base_for_trading: float
+    buy_budget: float  # USDC available for all buy orders
+    sell_budget: float  # base currency available for all sell orders
     rebalance_needed: bool
     rebalance_action: dict | None = None
     equity_per_pair: float = 0.0
     total_equity: float = 0.0
 
 
-def _score_config(buy_count: int, sell_count: int, amount: float,
+def _score_config(buy_count: int, sell_count: int, avg_amount: float,
                   price: float, equity: float) -> float:
-    """Score a grid configuration by expected daily return."""
+    """Score a grid configuration by expected daily return with pyramid sizing."""
     if buy_count < 1 or sell_count < 1:
         return 0.0
     R = DAILY_VOL * 1.2
-    order_val = amount * price
-    total = buy_count + sell_count
-    if total == 0 or equity <= 0:
+    if equity <= 0:
         return 0.0
 
     daily = 0.0
     for side_count in (buy_count, sell_count):
         if side_count == 0:
             continue
+        pyr = _pyramid_weights(side_count)
         for i in range(side_count):
             pos = ((i + 1) / side_count) ** 0.6
             dist = R * pos
             spacing = dist if i == 0 else R * (pos - ((i / side_count) ** 0.6))
             if spacing <= ROUNDTRIP_FEE:
                 continue
+            order_val = avg_amount * pyr[i] * price
             profit = (spacing - ROUNDTRIP_FEE) * order_val
             rt = min(3.0, DAILY_VOL / (2 * dist) * 0.5)
             daily += profit * rt
@@ -68,16 +82,6 @@ class CapitalAllocator:
     def allocate(self, pair: str, balances: dict, price: float,
                  pair_count: int, min_notional: float,
                  step_size: float) -> AllocationResult:
-        """Compute optimal allocation for a single pair.
-
-        Args:
-            pair: e.g. "BTC/USDC"
-            balances: {asset: {free, used, total}} from exchange
-            price: current price
-            pair_count: total number of active pairs
-            min_notional: exchange minimum order value
-            step_size: exchange quantity precision
-        """
         base_sym = pair.split("/")[0]
         quote_sym = pair.split("/")[1]
 
@@ -87,42 +91,40 @@ class CapitalAllocator:
         base_free = balances.get(base_sym, {}).get("free", 0.0)
 
         total_equity = quote_total + base_total * price
+        empty = AllocationResult(
+            grid_count=0, buy_count=0, sell_count=0,
+            amount_per_order=0, reserve_usdc=0,
+            quote_for_trading=0, base_for_trading=0,
+            buy_budget=0, sell_budget=0,
+            rebalance_needed=False, total_equity=0, equity_per_pair=0,
+        )
         if total_equity <= 0 or price <= 0:
-            return AllocationResult(
-                grid_count=0, buy_count=0, sell_count=0,
-                amount_per_order=0, reserve_usdc=0,
-                quote_for_trading=0, base_for_trading=0,
-                rebalance_needed=False, total_equity=0, equity_per_pair=0,
-            )
+            return empty
 
         equity_per_pair = total_equity / max(1, pair_count)
         reserve = total_equity * RESERVE_PCT
         tradable = equity_per_pair * (1 - RESERVE_PCT)
 
         quote_for_pair = min(quote_free, tradable)
-        base_for_pair_usdc = min(base_free * price, tradable)
+        base_for_pair = min(base_free, tradable / price) if price > 0 else 0.0
 
         min_amount = math.ceil((min_notional * 1.15) / price / step_size) * step_size
         min_order_cost = min_amount * price
 
         if min_order_cost <= 0:
-            return AllocationResult(
-                grid_count=0, buy_count=0, sell_count=0,
-                amount_per_order=0, reserve_usdc=reserve,
-                quote_for_trading=0, base_for_trading=0,
-                rebalance_needed=False, total_equity=total_equity,
-                equity_per_pair=equity_per_pair,
-            )
+            empty.reserve_usdc = reserve
+            empty.total_equity = total_equity
+            empty.equity_per_pair = equity_per_pair
+            return empty
 
-        max_buys = int(quote_for_pair / min_order_cost)
-        max_sells = int(base_free / min_amount) if min_amount > 0 else 0
+        max_buys = self._max_levels_for_budget(quote_for_pair, price, min_amount, is_quote=True)
+        max_sells = self._max_levels_for_budget(base_for_pair, price, min_amount, is_quote=False)
 
         best_score = -1.0
         best_buy = 0
         best_sell = 0
-        best_amount = min_amount
+        best_avg_amount = min_amount
 
-        max_per_side = max(max_buys, max_sells)
         for total_n in range(2, min(max_buys + max_sells, 16) + 1):
             for nb in range(max(0, total_n - max_sells), min(max_buys, total_n) + 1):
                 ns = total_n - nb
@@ -131,38 +133,53 @@ class CapitalAllocator:
                 if nb == 0 and ns == 0:
                     continue
 
-                buy_capital = quote_for_pair / nb if nb > 0 else 0
-                sell_capital = (base_free / ns) if ns > 0 else 0
+                if nb > 0:
+                    buy_ws = _pyramid_weight_sum(nb)
+                    base_buy = quote_for_pair / (buy_ws * price)
+                else:
+                    base_buy = 0
+                if ns > 0:
+                    sell_ws = _pyramid_weight_sum(ns)
+                    base_sell = base_for_pair / sell_ws
+                else:
+                    base_sell = 0
 
                 if nb > 0 and ns > 0:
-                    amount_from_buy = buy_capital / price
-                    amount_from_sell = sell_capital
-                    raw_amount = min(amount_from_buy, amount_from_sell)
+                    avg_amount = min(base_buy, base_sell)
                 elif nb > 0:
-                    raw_amount = buy_capital / price
+                    avg_amount = base_buy
                 else:
-                    raw_amount = sell_capital
+                    avg_amount = base_sell
 
-                amount = math.floor(raw_amount / step_size) * step_size
-                if amount < min_amount:
-                    amount = min_amount
+                avg_amount = math.floor(avg_amount / step_size) * step_size
+                if avg_amount < min_amount:
+                    avg_amount = min_amount
 
-                if nb > 0 and amount * price * nb > quote_for_pair * 1.05:
-                    continue
-                if ns > 0 and amount * ns > base_free * 1.05:
-                    continue
+                if nb > 0:
+                    buy_cost = sum(math.floor(avg_amount * w / step_size) * step_size * price
+                                  for w in _pyramid_weights(nb))
+                    if buy_cost > quote_for_pair * 1.05:
+                        continue
+                if ns > 0:
+                    sell_qty = sum(math.floor(avg_amount * w / step_size) * step_size
+                                  for w in _pyramid_weights(ns))
+                    if sell_qty > base_for_pair * 1.05:
+                        continue
 
-                score = _score_config(nb, ns, amount, price, equity_per_pair)
+                score = _score_config(nb, ns, avg_amount, price, equity_per_pair)
                 if score > best_score:
                     best_score = score
                     best_buy = nb
                     best_sell = ns
-                    best_amount = amount
+                    best_avg_amount = avg_amount
 
         if best_buy + best_sell < 2:
             best_buy = min(1, max_buys)
             best_sell = min(1, max_sells)
-            best_amount = min_amount
+            best_avg_amount = min_amount
+
+        buy_budget = quote_for_pair if best_buy > 0 else 0.0
+        sell_budget = base_for_pair if best_sell > 0 else 0.0
 
         rebalance_needed = False
         rebalance_action = None
@@ -174,39 +191,56 @@ class CapitalAllocator:
                 rebalance_value = deviation * total_equity * 0.3
                 rebalance_value = min(rebalance_value, total_equity * 0.05)
                 if actual_quote_ratio < self.target_quote_ratio:
-                    sell_amount = math.floor(rebalance_value / price / step_size) * step_size
-                    if sell_amount >= min_amount and sell_amount <= base_free:
-                        rebalance_action = {"side": "sell", "amount": sell_amount, "pair": pair}
+                    sell_amt = math.floor(rebalance_value / price / step_size) * step_size
+                    if sell_amt >= min_amount and sell_amt <= base_free:
+                        rebalance_action = {"side": "sell", "amount": sell_amt, "pair": pair}
                     else:
                         rebalance_needed = False
                 else:
-                    buy_amount = math.floor(rebalance_value / price / step_size) * step_size
-                    if buy_amount >= min_amount and buy_amount * price <= quote_free:
-                        rebalance_action = {"side": "buy", "amount": buy_amount, "pair": pair}
+                    buy_amt = math.floor(rebalance_value / price / step_size) * step_size
+                    if buy_amt >= min_amount and buy_amt * price <= quote_free:
+                        rebalance_action = {"side": "buy", "amount": buy_amt, "pair": pair}
                     else:
                         rebalance_needed = False
 
         grid_count = best_buy + best_sell
 
         logger.info(
-            "%s Allocation — %dB+%dS=%d Level, %.8f %s/Order (≈%.2f %s), "
-            "Quote: %.2f frei, Base: %.8f frei, Equity: %.2f, Reserve: %.2f%s",
-            pair, best_buy, best_sell, grid_count, best_amount, base_sym,
-            best_amount * price, quote_sym, quote_for_pair, base_free,
-            total_equity, reserve,
-            " [REBALANCE noetig]" if rebalance_needed else "",
+            "%s Allocation — %dB+%dS=%d Level, avg %.8f %s/Order (≈%.2f %s), "
+            "BuyBudget: %.2f %s, SellBudget: %.8f %s, Equity: %.2f%s",
+            pair, best_buy, best_sell, grid_count, best_avg_amount, base_sym,
+            best_avg_amount * price, quote_sym, buy_budget, quote_sym,
+            sell_budget, base_sym, total_equity,
+            " [REBALANCE]" if rebalance_needed else "",
         )
 
         return AllocationResult(
             grid_count=grid_count,
             buy_count=best_buy,
             sell_count=best_sell,
-            amount_per_order=best_amount,
+            amount_per_order=best_avg_amount,
             reserve_usdc=reserve,
             quote_for_trading=quote_for_pair,
-            base_for_trading=base_free,
+            base_for_trading=base_for_pair,
+            buy_budget=buy_budget,
+            sell_budget=sell_budget,
             rebalance_needed=rebalance_needed,
             rebalance_action=rebalance_action,
             equity_per_pair=equity_per_pair,
             total_equity=total_equity,
         )
+
+    @staticmethod
+    def _max_levels_for_budget(budget: float, price: float,
+                               min_amount: float, is_quote: bool) -> int:
+        """How many pyramid levels a budget can afford."""
+        for n in range(16, 0, -1):
+            ws = _pyramid_weight_sum(n)
+            if is_quote:
+                base_amount = budget / (ws * price) if price > 0 else 0
+            else:
+                base_amount = budget / ws if ws > 0 else 0
+            smallest = base_amount * 0.7  # smallest pyramid weight
+            if smallest >= min_amount * 0.95:
+                return n
+        return 0

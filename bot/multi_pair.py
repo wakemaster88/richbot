@@ -53,6 +53,8 @@ class PairBot:
         self.pair_amount = 0.0
         self.pair_buy_count = 2
         self.pair_sell_count = 2
+        self.pair_step_size = 0.00001
+        self.pair_min_amount = 0.0
         self.last_allocation: AllocationResult | None = None
 
         self.grid = GridEngine(
@@ -109,13 +111,16 @@ class PairBot:
                  "win": managed_order.pnl > 0},
             ))
 
-    def apply_allocation(self, alloc: AllocationResult):
+    def apply_allocation(self, alloc: AllocationResult, step_size: float = 0.00001,
+                         min_amount: float = 0.0):
         """Apply an AllocationResult to this pair bot's grid config."""
         self.last_allocation = alloc
         self.pair_grid_count = alloc.grid_count
         self.pair_buy_count = alloc.buy_count
         self.pair_sell_count = alloc.sell_count
         self.pair_amount = alloc.amount_per_order
+        self.pair_step_size = step_size
+        self.pair_min_amount = min_amount
 
         self.grid = GridEngine(
             grid_count=alloc.grid_count,
@@ -160,11 +165,14 @@ class PairBot:
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
         step_size = market.get("precision", {}).get("amount", 0.00001)
 
+        import math as _m
+        min_amount = _m.ceil((min_notional * 1.15) / self.current_price / step_size) * step_size
+
         alloc = allocator.allocate(
             self.pair, balance, self.current_price,
             pair_count, min_notional, step_size,
         )
-        self.apply_allocation(alloc)
+        self.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
 
         if alloc.grid_count < 2:
             logger.warning("%s: Nicht genug Kapital fuer Grid (Equity: %.2f)", self.pair, alloc.total_equity)
@@ -174,6 +182,8 @@ class PairBot:
         self.grid.calculate_grid(
             self.current_range, self.current_price, alloc.amount_per_order,
             buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+            buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
+            step_size=step_size, min_amount=min_amount,
         )
 
         try:
@@ -232,9 +242,13 @@ class PairBot:
 
                 new_range = shift_range(self.current_range, breakout)
                 self.current_range = new_range
+                alloc = self.last_allocation
                 self.grid.trail_grid(
                     breakout, price, new_range, self.pair_amount,
                     buy_count=self.pair_buy_count, sell_count=self.pair_sell_count,
+                    buy_budget=alloc.buy_budget if alloc else None,
+                    sell_budget=alloc.sell_budget if alloc else None,
+                    step_size=self.pair_step_size, min_amount=self.pair_min_amount,
                 )
                 placed = await self.order_mgr.place_grid_orders(self.pair)
 
@@ -626,13 +640,17 @@ class MultiPairBot:
                             market = self.exchange._markets.get(pair, {})
                             min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
                             step_size = market.get("precision", {}).get("amount", 0.00001)
+                            import math as _m
+                            min_amount = _m.ceil((min_notional * 1.15) / price / step_size) * step_size
                             alloc = self.allocator.allocate(
                                 pair, balance, price, len(self.pair_bots), min_notional, step_size,
                             )
-                            bot.apply_allocation(alloc)
+                            bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                             bot.grid.calculate_grid(
                                 new_range, price, alloc.amount_per_order,
                                 buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+                                buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
+                                step_size=step_size, min_amount=min_amount,
                             )
                             await bot.order_mgr.place_grid_orders(pair)
                         else:
@@ -865,17 +883,21 @@ class MultiPairBot:
                 )
 
                 if changed and new_total >= 2:
-                    bot.apply_allocation(alloc)
+                    import math as _m
+                    min_amount = _m.ceil((min_notional * 1.15) / price / step_size) * step_size
+                    bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
 
                     await bot.order_mgr.cancel_all(pair)
                     bot.grid.calculate_grid(
                         bot.current_range, price, alloc.amount_per_order,
                         buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+                        buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
+                        step_size=step_size, min_amount=min_amount,
                     )
                     await bot.order_mgr.place_grid_orders(pair)
 
                     logger.info(
-                        "%s Auto-Grid: %dB+%dS → %dB+%dS, %.8f/Order (Equity: %.2f)",
+                        "%s Auto-Grid: %dB+%dS → %dB+%dS, avg %.8f/Order (Equity: %.2f)",
                         pair, old_buy, old_sell, alloc.buy_count, alloc.sell_count,
                         alloc.amount_per_order, alloc.total_equity,
                     )
@@ -1053,15 +1075,19 @@ class MultiPairBot:
                             market = self.exchange._markets.get(pair, {})
                             min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
                             step_size = market.get("precision", {}).get("amount", 0.00001)
+                            import math as _m
+                            min_amount = _m.ceil((min_notional * 1.15) / bot.current_price / step_size) * step_size
                             alloc = self.allocator.allocate(
                                 pair, balance, bot.current_price,
                                 len(self.pair_bots), min_notional, step_size,
                             )
-                            bot.apply_allocation(alloc)
+                            bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                             await bot.order_mgr.cancel_all(pair)
                             bot.grid.calculate_grid(
                                 bot.current_range, bot.current_price, alloc.amount_per_order,
                                 buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+                                buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
+                                step_size=step_size, min_amount=min_amount,
                             )
                             await bot.order_mgr.place_grid_orders(pair)
                             actual = len(bot.grid.state.levels)
