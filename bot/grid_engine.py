@@ -1,4 +1,8 @@
-"""Grid calculation engine with infinity/trailing grid support."""
+"""Grid calculation engine with infinity/trailing grid support.
+
+Supports asymmetric grids where buy_count and sell_count can differ.
+Range is computed internally per side to guarantee min_fee_spacing.
+"""
 
 from __future__ import annotations
 
@@ -78,7 +82,7 @@ class GridState:
 class GridEngine:
     """Computes and manages grid levels with trailing/infinity support."""
 
-    MIN_SPACING_VS_FEE = 1.2  # spacing must be >= 1.2x round-trip fee
+    MIN_SPACING_VS_FEE = 1.2
     FEE_RATE = 0.001
 
     def __init__(self, grid_count: int = 20, spacing_percent: float = 0.5,
@@ -101,72 +105,107 @@ class GridEngine:
         """Sqrt-weighted positions: denser near price, sparser at boundaries."""
         if count <= 1:
             return [1.0]
-        raw = [((i + 1) / count) ** 0.6 for i in range(count)]
-        return raw
+        return [((i + 1) / count) ** 0.6 for i in range(count)]
 
-    def _build_levels(self, range_result: RangeResult, current_price: float,
-                       amount: float, use_linear: bool = False) -> list[GridLevel]:
-        """Build grid levels with either sqrt-weighted or linear spacing."""
-        min_fee_spacing = current_price * self.FEE_RATE * 2 * self.MIN_SPACING_VS_FEE
+    def _min_fee_spacing(self, price: float) -> float:
+        return price * self.FEE_RATE * 2 * self.MIN_SPACING_VS_FEE
 
-        total_levels = self.grid_count
-        buy_count = total_levels // 2
-        sell_count = total_levels - buy_count
+    def _build_side(self, side: str, count: int, current_price: float,
+                    span: float, amount: float, min_spacing: float,
+                    use_linear: bool = False) -> list[GridLevel]:
+        """Build levels for one side of the grid."""
+        if count <= 0 or span <= 0:
+            return []
+
+        if use_linear:
+            weights = [(i + 1) / count for i in range(count)]
+        else:
+            weights = self._weighted_positions(count)
 
         levels: list[GridLevel] = []
+        for i, w in enumerate(weights):
+            if side == "buy":
+                price = current_price - span * w
+            else:
+                price = current_price + span * w
 
-        buy_span = current_price - range_result.lower
-        if use_linear and buy_count > 0:
-            buy_weights = [(i + 1) / buy_count for i in range(buy_count)]
-        else:
-            buy_weights = self._weighted_positions(buy_count)
-        for i, w in enumerate(buy_weights):
-            price = current_price - buy_span * w
-            price = max(price, range_result.lower)
-            if i > 0 and levels:
-                if abs(price - levels[-1].price) < min_fee_spacing:
-                    continue
-            levels.append(GridLevel(price=round(price, 2), side="buy", amount=amount, index=i))
+            if levels and abs(price - levels[-1].price) < min_spacing:
+                continue
+            levels.append(GridLevel(price=round(price, 2), side=side, amount=amount, index=i))
 
-        sell_span = range_result.upper - current_price
-        if use_linear and sell_count > 0:
-            sell_weights = [(i + 1) / sell_count for i in range(sell_count)]
-        else:
-            sell_weights = self._weighted_positions(sell_count)
-        for i, w in enumerate(sell_weights):
-            price = current_price + sell_span * w
-            price = min(price, range_result.upper)
-            if i > 0 and levels:
-                if abs(price - levels[-1].price) < min_fee_spacing:
-                    continue
-            levels.append(GridLevel(price=round(price, 2), side="sell", amount=amount, index=i))
-
-        levels.sort(key=lambda l: l.price)
         return levels
 
     def calculate_grid(self, range_result: RangeResult, current_price: float,
-                       dynamic_amount: float | None = None) -> list[GridLevel]:
-        """Calculate grid levels within the given range.
-        Tries sqrt-weighted spacing first; falls back to linear if too many levels are filtered."""
+                       dynamic_amount: float | None = None,
+                       buy_count: int | None = None,
+                       sell_count: int | None = None) -> list[GridLevel]:
+        """Calculate grid levels, optionally with asymmetric buy/sell counts.
+
+        If buy_count/sell_count are provided, the range is widened per-side
+        internally to guarantee all levels fit with min_fee_spacing.
+        """
         self.state.range_result = range_result
         self.state.last_price = current_price
         amount = dynamic_amount or self.amount_per_order
 
-        levels = self._build_levels(range_result, current_price, amount, use_linear=False)
+        if buy_count is None and sell_count is None:
+            buy_count = self.grid_count // 2
+            sell_count = self.grid_count - buy_count
+        elif buy_count is None:
+            buy_count = max(0, self.grid_count - sell_count)
+        elif sell_count is None:
+            sell_count = max(0, self.grid_count - buy_count)
 
-        if len(levels) < self.grid_count:
-            linear = self._build_levels(range_result, current_price, amount, use_linear=True)
-            if len(linear) > len(levels):
-                levels = linear
+        min_spacing = self._min_fee_spacing(current_price)
+
+        buy_span_needed = max(buy_count, 1) * min_spacing * 1.15 if buy_count > 0 else 0
+        sell_span_needed = max(sell_count, 1) * min_spacing * 1.15 if sell_count > 0 else 0
+
+        actual_buy_span = current_price - range_result.lower
+        actual_sell_span = range_result.upper - current_price
+
+        buy_span = max(actual_buy_span, buy_span_needed)
+        sell_span = max(actual_sell_span, sell_span_needed)
+
+        effective_lower = current_price - buy_span
+        effective_upper = current_price + sell_span
+
+        effective_range = RangeResult(
+            upper=effective_upper, lower=effective_lower, mid=current_price,
+            atr=range_result.atr, source=range_result.source,
+            confidence=range_result.confidence,
+        )
+        self.state.range_result = effective_range
+
+        if buy_span != actual_buy_span or sell_span != actual_sell_span:
+            logger.info(
+                "Range angepasst fuer %dB+%dS: [%.2f, %.2f] (Buy-Span: %.2f, Sell-Span: %.2f)",
+                buy_count, sell_count, effective_lower, effective_upper, buy_span, sell_span,
+            )
+
+        buy_levels = self._build_side("buy", buy_count, current_price, buy_span, amount, min_spacing, use_linear=False)
+        sell_levels = self._build_side("sell", sell_count, current_price, sell_span, amount, min_spacing, use_linear=False)
+
+        if len(buy_levels) < buy_count:
+            linear_buys = self._build_side("buy", buy_count, current_price, buy_span, amount, min_spacing, use_linear=True)
+            if len(linear_buys) > len(buy_levels):
+                buy_levels = linear_buys
+        if len(sell_levels) < sell_count:
+            linear_sells = self._build_side("sell", sell_count, current_price, sell_span, amount, min_spacing, use_linear=True)
+            if len(linear_sells) > len(sell_levels):
+                sell_levels = linear_sells
+
+        levels = buy_levels + sell_levels
+        levels.sort(key=lambda l: l.price)
 
         self.state.levels = levels
         self.state.invalidate()
 
-        actual_buys = sum(1 for l in levels if l.side == "buy")
-        actual_sells = sum(1 for l in levels if l.side == "sell")
+        ab = len(buy_levels)
+        a_s = len(sell_levels)
         logger.info(
-            "Grid calculated: %d levels (buy=%d, sell=%d) in [%.2f, %.2f]",
-            len(levels), actual_buys, actual_sells, range_result.lower, range_result.upper,
+            "Grid calculated: %dB+%dS=%d levels in [%.2f, %.2f]",
+            ab, a_s, len(levels), effective_lower, effective_upper,
         )
         return levels
 
@@ -185,16 +224,17 @@ class GridEngine:
         return None
 
     def trail_grid(self, direction: str, current_price: float,
-                   new_range: RangeResult, dynamic_amount: float | None = None) -> list[GridLevel]:
+                   new_range: RangeResult, dynamic_amount: float | None = None,
+                   buy_count: int | None = None,
+                   sell_count: int | None = None) -> list[GridLevel]:
         """Trail the grid in the given direction by recalculating."""
         self.state.shift_count += 1
         logger.info(
             "Trailing grid %s (shift #%d) to new range [%.2f, %.2f]",
             direction, self.state.shift_count, new_range.lower, new_range.upper,
         )
-        old_filled = [l for l in self.state.levels if l.filled]
-        new_levels = self.calculate_grid(new_range, current_price, dynamic_amount)
-        return new_levels
+        return self.calculate_grid(new_range, current_price, dynamic_amount,
+                                   buy_count=buy_count, sell_count=sell_count)
 
     def mark_filled(self, order_id: str) -> GridLevel | None:
         """Mark a grid level as filled by order ID."""
@@ -207,7 +247,7 @@ class GridEngine:
         return None
 
     def get_opposite_level(self, filled_level: GridLevel) -> GridLevel | None:
-        """Get the corresponding opposite level for a filled order (buy→sell, sell→buy)."""
+        """Get the corresponding opposite level for a filled order (buy->sell, sell->buy)."""
         target_side = "sell" if filled_level.side == "buy" else "buy"
         for level in self.state.levels:
             if level.side == target_side and not level.filled and level.index == filled_level.index:

@@ -171,9 +171,10 @@ class PairBot:
             self._grid_issue = "Nicht genug Kapital"
             return
 
-        self._ensure_range_fits(alloc)
-
-        self.grid.calculate_grid(self.current_range, self.current_price, alloc.amount_per_order)
+        self.grid.calculate_grid(
+            self.current_range, self.current_price, alloc.amount_per_order,
+            buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+        )
 
         try:
             placed = await self.order_mgr.place_grid_orders(self.pair)
@@ -201,40 +202,6 @@ class PairBot:
                  "equity": alloc.total_equity, "reserve": alloc.reserve_usdc,
                  "rebalance": alloc.rebalance_needed},
             ))
-
-    def _ensure_range_fits(self, alloc: AllocationResult):
-        """Widen range if needed to fit all grid levels with fee-spacing."""
-        price = self.current_price
-        min_fee_spacing = price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
-        buy_half = max(alloc.buy_count, 1) * min_fee_spacing * 1.15
-        sell_half = max(alloc.sell_count, 1) * min_fee_spacing * 1.15
-
-        need_lower = price - buy_half
-        need_upper = price + sell_half
-
-        changed = False
-        new_lower = self.current_range.lower
-        new_upper = self.current_range.upper
-
-        if self.current_range.lower > need_lower:
-            new_lower = need_lower
-            changed = True
-        if self.current_range.upper < need_upper:
-            new_upper = need_upper
-            changed = True
-
-        if changed:
-            old_spread = self.current_range.spread
-            self.current_range = RangeResult(
-                upper=new_upper, lower=new_lower, mid=price,
-                atr=self.current_range.atr, source=self.current_range.source,
-                confidence=self.current_range.confidence,
-            )
-            logger.info(
-                "%s Range angepasst: %.2f → %.2f (%dB braucht %.2f unten, %dS braucht %.2f oben)",
-                self.pair, old_spread, self.current_range.spread,
-                alloc.buy_count, buy_half, alloc.sell_count, sell_half,
-            )
 
     async def update_tick(self, price: float):
         """Process a price update."""
@@ -264,17 +231,11 @@ class PairBot:
                 await self.order_mgr.cancel_all(self.pair)
 
                 new_range = shift_range(self.current_range, breakout)
-                min_fs = price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
-                lps = max(self.pair_grid_count // 2, 1)
-                min_hr = lps * min_fs * 1.15
-                if new_range.spread < min_hr * 2:
-                    new_range = RangeResult(
-                        upper=price + min_hr, lower=price - min_hr,
-                        mid=price, atr=new_range.atr, source=new_range.source,
-                        confidence=new_range.confidence,
-                    )
                 self.current_range = new_range
-                self.grid.trail_grid(breakout, price, new_range, self.pair_amount)
+                self.grid.trail_grid(
+                    breakout, price, new_range, self.pair_amount,
+                    buy_count=self.pair_buy_count, sell_count=self.pair_sell_count,
+                )
                 placed = await self.order_mgr.place_grid_orders(self.pair)
 
                 if self.cloud and self.cloud.connected:
@@ -661,12 +622,18 @@ class MultiPairBot:
                             await bot.order_mgr.cancel_all(pair)
                             bot.current_range = new_range
 
-                            vol = self.risk.calculate_volatility(df["close"].values)
                             balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
-                            usdt = balance.get(bot.quote, {}).get("free", 10000)
-                            dynamic_amount = self.risk.calculate_position_size(usdt, price, vol)
-
-                            bot.grid.calculate_grid(new_range, price, dynamic_amount)
+                            market = self.exchange._markets.get(pair, {})
+                            min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
+                            step_size = market.get("precision", {}).get("amount", 0.00001)
+                            alloc = self.allocator.allocate(
+                                pair, balance, price, len(self.pair_bots), min_notional, step_size,
+                            )
+                            bot.apply_allocation(alloc)
+                            bot.grid.calculate_grid(
+                                new_range, price, alloc.amount_per_order,
+                                buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+                            )
                             await bot.order_mgr.place_grid_orders(pair)
                         else:
                             logger.debug("%s: Range refresh — drift %.1f%%, keeping current grid", pair, drift * 100)
@@ -899,10 +866,12 @@ class MultiPairBot:
 
                 if changed and new_total >= 2:
                     bot.apply_allocation(alloc)
-                    bot._ensure_range_fits(alloc)
 
                     await bot.order_mgr.cancel_all(pair)
-                    bot.grid.calculate_grid(bot.current_range, price, alloc.amount_per_order)
+                    bot.grid.calculate_grid(
+                        bot.current_range, price, alloc.amount_per_order,
+                        buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+                    )
                     await bot.order_mgr.place_grid_orders(pair)
 
                     logger.info(
@@ -1089,9 +1058,11 @@ class MultiPairBot:
                                 len(self.pair_bots), min_notional, step_size,
                             )
                             bot.apply_allocation(alloc)
-                            bot._ensure_range_fits(alloc)
                             await bot.order_mgr.cancel_all(pair)
-                            bot.grid.calculate_grid(bot.current_range, bot.current_price, alloc.amount_per_order)
+                            bot.grid.calculate_grid(
+                                bot.current_range, bot.current_price, alloc.amount_per_order,
+                                buy_count=alloc.buy_count, sell_count=alloc.sell_count,
+                            )
                             await bot.order_mgr.place_grid_orders(pair)
                             actual = len(bot.grid.state.levels)
                             logger.info("%s Grid neu berechnet: %dB+%dS=%d Level, %.8f/Order",
