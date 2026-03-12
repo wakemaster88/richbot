@@ -1019,6 +1019,7 @@ class MultiPairBot:
                 await self._auto_adjust_grid()
                 if self.cloud.connected:
                     await self._log_analytics_snapshot()
+                    await self._monitoring_checks()
 
             if self.cloud.connected:
                 metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
@@ -1059,6 +1060,82 @@ class MultiPairBot:
             })
         except Exception as e:
             logger.debug("State persist failed: %s", e)
+
+    async def _monitoring_checks(self):
+        """Run health checks and emit alerts for critical conditions."""
+        if not self.cloud.connected:
+            return
+        now = time.time()
+        if not hasattr(self, "_mon_state"):
+            self._mon_state: dict = {"last_alert": {}, "loss_streak": {}}
+
+        cooldown = 600  # don't repeat same alert within 10 min
+
+        for pair, bot in self.pair_bots.items():
+            stats = self.tracker._get_pair_stats(pair)
+            summary = self.tracker.get_summary(pair)
+
+            # No trades for 2 hours
+            alert_key = f"no_trade_{pair}"
+            last_trade_ts = stats.pnl_history[-1][0] if stats.pnl_history else self._mon_state.get("start", now)
+            if now - last_trade_ts > 7200 and now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                asyncio.create_task(self.cloud.log_event(
+                    "monitoring", f"Kein Trade seit 2h — Grid pruefen ({pair})",
+                    {"pair": pair, "last_trade_age_sec": int(now - last_trade_ts)},
+                    level="warn",
+                ))
+                self._mon_state["last_alert"][alert_key] = now
+
+            # Drawdown checks
+            dd = summary.get("max_drawdown_pct", 0)
+            if dd > 5:
+                alert_key = f"dd_critical_{pair}"
+                if now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                    asyncio.create_task(self.cloud.log_event(
+                        "monitoring", f"Drawdown {dd:.1f}% — Trading pausiert ({pair})",
+                        {"pair": pair, "drawdown": dd}, level="critical",
+                    ))
+                    self._mon_state["last_alert"][alert_key] = now
+            elif dd > 3:
+                alert_key = f"dd_warn_{pair}"
+                if now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                    asyncio.create_task(self.cloud.log_event(
+                        "monitoring", f"Drawdown {dd:.1f}% — Position-Size reduziert ({pair})",
+                        {"pair": pair, "drawdown": dd}, level="warn",
+                    ))
+                    self._mon_state["last_alert"][alert_key] = now
+
+            # USDC ratio check
+            alloc = bot.last_allocation
+            if alloc and alloc.total_equity > 0:
+                usdc_pct = (alloc.quote_for_trading + alloc.reserve_usdc) / alloc.total_equity * 100
+                if usdc_pct < 20:
+                    alert_key = f"low_usdc_{pair}"
+                    if now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                        asyncio.create_task(self.cloud.log_event(
+                            "monitoring", f"Nur {usdc_pct:.0f}% USDC — Rebalance noetig ({pair})",
+                            {"pair": pair, "usdc_pct": round(usdc_pct, 1)}, level="warn",
+                        ))
+                        self._mon_state["last_alert"][alert_key] = now
+
+            # Consecutive loss streak
+            recent_trades = self.tracker.get_trade_history(pair, limit=10)
+            losses = 0
+            for t in recent_trades:
+                if t.get("pnl", 0) < 0:
+                    losses += 1
+                else:
+                    break
+            if losses >= 5:
+                alert_key = f"loss_streak_{pair}"
+                if now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                    asyncio.create_task(self.cloud.log_event(
+                        "monitoring", f"{losses} Verluste in Folge — Spacing geweitet ({pair})",
+                        {"pair": pair, "consecutive_losses": losses}, level="warn",
+                    ))
+                    self._mon_state["last_alert"][alert_key] = now
+
+        self._mon_state["start"] = self._mon_state.get("start", now)
 
     async def _optimization_loop(self):
         """Self-optimize every 6 hours based on recent performance."""

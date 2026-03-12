@@ -655,10 +655,14 @@ function AnalyticsPanel({ data }: { data: AnalyticsData }) {
 
 const EVT_ICONS: Record<string, string> = {
   trade: "T", grid: "G", error: "!", config: "C", system: "S",
+  monitoring: "⚡", regime: "R", optimization: "⚙", trailing_tp: "↗", memory: "M",
 };
 const EVT_COLORS: Record<string, string> = {
   trade: "var(--accent)", grid: "var(--cyan)", error: "var(--down)",
-  warn: "var(--warn)", config: "var(--text-secondary)", system: "var(--text-tertiary)",
+  warn: "var(--warn)", critical: "#ef4444", success: "var(--up)",
+  config: "var(--text-secondary)", system: "var(--text-tertiary)",
+  monitoring: "var(--warn)", regime: "#3b82f6", optimization: "var(--accent)",
+  trailing_tp: "var(--up)", memory: "var(--warn)",
 };
 
 function AktivitaetsFeed({ events }: { events: BotEvent[] }) {
@@ -675,11 +679,14 @@ function AktivitaetsFeed({ events }: { events: BotEvent[] }) {
       </div>
       <div className="space-y-0.5 max-h-80 overflow-y-auto">
         {shown.map((ev) => {
-          const col = EVT_COLORS[ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : ev.category] || "var(--text-tertiary)";
+          const levelColor = ev.level === "critical" ? "critical" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : ev.level === "success" ? "success" : "";
+          const col = EVT_COLORS[levelColor || ev.category] || "var(--text-tertiary)";
           const icon = EVT_ICONS[ev.category] || "·";
+          const isCritical = ev.level === "critical";
           const zeit = new Date(ev.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
           return (
-            <div key={ev.id} className="flex items-start gap-2 text-[10px] py-1.5 px-2 rounded hover:bg-[var(--bg-secondary)] transition-colors">
+            <div key={ev.id} className="flex items-start gap-2 text-[10px] py-1.5 px-2 rounded hover:bg-[var(--bg-secondary)] transition-colors"
+              style={isCritical ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" } : undefined}>
               <span className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold mt-0.5"
                 style={{ background: `color-mix(in srgb, ${col} 15%, transparent)`, color: col }}>
                 {icon}
@@ -1163,7 +1170,29 @@ export default function Dashboard() {
 
       {/* Header */}
       <header className="flex items-center justify-between gap-3 mb-4">
-        <StatusBadge status={status.status} hb={status.lastHeartbeat} />
+        <div className="flex items-center gap-2">
+          <StatusBadge status={status.status} hb={status.lastHeartbeat} />
+          {(() => {
+            const critCount = events.filter(e => e.level === "critical" || e.level === "error").length;
+            const warnCount = events.filter(e => e.level === "warn").length;
+            return (
+              <>
+                {critCount > 0 && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                    style={{ background: "rgba(239,68,68,0.12)", color: "#ef4444" }}>
+                    ⚠ {critCount}
+                  </span>
+                )}
+                {warnCount > 0 && critCount === 0 && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                    style={{ background: "var(--warn-bg)", color: "var(--warn)" }}>
+                    {warnCount} Warnung{warnCount > 1 ? "en" : ""}
+                  </span>
+                )}
+              </>
+            );
+          })()}
+        </div>
         <div className="flex items-center gap-2 text-[10px] text-[var(--text-quaternary)]">
           <span>{laufzeit(status.startedAt)}</span>
           <span className="w-px h-2.5 bg-[var(--border)]" />
