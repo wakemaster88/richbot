@@ -194,3 +194,35 @@ class TrailingTakeProfit:
             }
             for e in self.get_entries(pair)
         ]
+
+    def serialize(self) -> list[dict]:
+        """Serialize all active entries for DB persistence."""
+        return [
+            {
+                "pair": e.pair, "side": e.side, "entry_price": e.entry_price,
+                "amount": e.amount, "trail_percent": e.trail_percent,
+                "min_profit_percent": e.min_profit_percent,
+                "max_loss_percent": e.max_loss_percent,
+                "created_at": e.created_at, "highest": e.highest,
+                "lowest": e.lowest, "grid_level_price": e.grid_level_price,
+            }
+            for e in self.get_entries()
+        ]
+
+    def deserialize(self, data: list[dict]):
+        """Restore entries from serialized data."""
+        for d in data:
+            entry = TrailingEntry(
+                pair=d["pair"], side=d["side"],
+                entry_price=d["entry_price"], amount=d["amount"],
+                trail_percent=d.get("trail_percent", self.trail_percent),
+                min_profit_percent=d.get("min_profit_percent", self.min_profit_percent),
+                max_loss_percent=d.get("max_loss_percent", self.max_loss_percent),
+                created_at=d.get("created_at", time.time()),
+                grid_level_price=d.get("grid_level_price", d["entry_price"]),
+            )
+            entry.highest = d.get("highest", entry.entry_price)
+            entry.lowest = d.get("lowest", entry.entry_price)
+            self._entries.append(entry)
+        if data:
+            logger.info("Restored %d trailing-TP entries from saved state", len(data))

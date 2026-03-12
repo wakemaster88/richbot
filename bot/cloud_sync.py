@@ -211,6 +211,57 @@ class CloudSync:
             logger.warning("Config fetch failed: %s", e)
         return None
 
+    async def save_state(self, state: dict):
+        """Persist bot state for recovery after restart."""
+        if not self._pool:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO bot_state (bot_id, grid_state, trailing_tps, last_prices, updated_at) "
+                    "VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, NOW()) "
+                    "ON CONFLICT (bot_id) DO UPDATE SET "
+                    "grid_state=EXCLUDED.grid_state, trailing_tps=EXCLUDED.trailing_tps, "
+                    "last_prices=EXCLUDED.last_prices, updated_at=NOW()",
+                    self.bot_id,
+                    json.dumps(state.get("grid_state", {})),
+                    json.dumps(state.get("trailing_tps", [])),
+                    json.dumps(state.get("last_prices", {})),
+                )
+        except Exception as e:
+            logger.debug("State save failed: %s", e)
+
+    async def load_state(self, max_age_sec: int = 600) -> dict | None:
+        """Load persisted state if younger than max_age_sec."""
+        if not self._pool:
+            return None
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT grid_state, trailing_tps, last_prices, updated_at "
+                    "FROM bot_state WHERE bot_id=$1",
+                    self.bot_id,
+                )
+                if not row:
+                    return None
+                from datetime import datetime, timezone
+                updated = row["updated_at"]
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - updated).total_seconds()
+                if age > max_age_sec:
+                    logger.info("Saved state too old (%.0fs > %ds), clean start", age, max_age_sec)
+                    return None
+                logger.info("Loaded saved state (age: %.0fs)", age)
+                return {
+                    "grid_state": json.loads(row["grid_state"]) if row["grid_state"] else {},
+                    "trailing_tps": json.loads(row["trailing_tps"]) if row["trailing_tps"] else [],
+                    "last_prices": json.loads(row["last_prices"]) if row["last_prices"] else {},
+                }
+        except Exception as e:
+            logger.warning("State load failed: %s", e)
+            return None
+
     async def log_event(self, category: str, message: str,
                         detail: dict | None = None, level: str = "info"):
         """Log a structured event to the database for the dashboard activity feed."""
@@ -467,6 +518,14 @@ CREATE TABLE IF NOT EXISTS bot_secrets (
     value TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(bot_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS bot_state (
+    bot_id TEXT PRIMARY KEY,
+    grid_state JSONB NOT NULL DEFAULT '{}',
+    trailing_tps JSONB NOT NULL DEFAULT '[]',
+    last_prices JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS bot_events (

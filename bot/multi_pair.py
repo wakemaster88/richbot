@@ -135,21 +135,82 @@ class PairBot:
         )
         self.order_mgr.grid = self.grid
 
-    async def initialize(self, allocator: CapitalAllocator, pair_count: int):
-        """Set up initial grid using CapitalAllocator."""
-        logger.info("Initializing pair bot for %s", self.pair)
+    async def _recover_orders(self, saved_grid: dict) -> bool:
+        """Try to match live open orders against saved grid levels.
 
+        Returns True if recovery succeeded, False if a clean start is needed.
+        """
         try:
-            old_orders = await self.exchange.async_fetch_open_orders(self.pair)
-            if old_orders:
-                for o in old_orders:
-                    try:
-                        await self.exchange.async_cancel_order(o["id"], self.pair)
-                    except Exception:
-                        pass
-                logger.info("%s: %d alte offene Orders gecancelt", self.pair, len(old_orders))
-        except Exception as e:
-            logger.warning("Alte Orders pruefen fehlgeschlagen: %s", e)
+            live_orders = await self.exchange.async_fetch_open_orders(self.pair)
+        except Exception:
+            return False
+
+        if not live_orders:
+            return False
+
+        saved_levels = saved_grid.get("levels", [])
+        if not saved_levels:
+            return False
+
+        saved_range = saved_grid.get("range")
+        if saved_range:
+            from bot.dynamic_range import RangeResult
+            self.current_range = RangeResult(
+                upper=saved_range["upper"], lower=saved_range["lower"],
+                mid=saved_range.get("mid", (saved_range["upper"] + saved_range["lower"]) / 2),
+                atr=saved_range.get("atr", 0), source=saved_range.get("source", "recovered"),
+            )
+
+        from bot.grid_engine import GridLevel
+        PRICE_TOLERANCE = 0.001
+
+        recovered_levels: list[GridLevel] = []
+        matched_order_ids: set[str] = set()
+
+        for sl in saved_levels:
+            level = GridLevel(
+                price=sl["price"], side=sl["side"], amount=sl["amount"],
+                index=sl.get("index", len(recovered_levels)),
+            )
+
+            for lo in live_orders:
+                if lo["id"] in matched_order_ids:
+                    continue
+                lo_side = lo.get("side", "").lower()
+                lo_price = float(lo.get("price", 0))
+                if lo_side == level.side and lo_price > 0:
+                    if abs(lo_price - level.price) / level.price < PRICE_TOLERANCE:
+                        level.order_id = lo["id"]
+                        level.amount = float(lo.get("amount", level.amount))
+                        matched_order_ids.add(lo["id"])
+                        managed = OrderManager.create_managed(lo["id"], self.pair, level)
+                        self.order_mgr.orders[lo["id"]] = managed
+                        break
+
+            recovered_levels.append(level)
+
+        self.grid.state.levels = recovered_levels
+        self.grid.state.invalidate()
+        if self.current_range:
+            self.grid.state.range_result = self.current_range
+
+        matched = sum(1 for l in recovered_levels if l.order_id)
+        unmatched_live = len(live_orders) - len(matched_order_ids)
+
+        logger.info(
+            "%s State Recovery: %d/%d Levels matched, %d live Orders unmatched",
+            self.pair, matched, len(recovered_levels), unmatched_live,
+        )
+        return matched > 0
+
+    async def initialize(self, allocator: CapitalAllocator, pair_count: int,
+                         saved_state: dict | None = None):
+        """Set up initial grid using CapitalAllocator.
+
+        If saved_state is provided and recent, tries to recover existing orders
+        instead of cancelling everything and starting fresh.
+        """
+        logger.info("Initializing pair bot for %s", self.pair)
 
         fetch_limit = self.config.pi.ohlcv_fetch_limit if self.config.is_pi else 200
         ohlcv = await self.exchange.async_fetch_ohlcv(self.pair, timeframe=self.config.atr.timeframe, limit=fetch_limit)
@@ -157,12 +218,6 @@ class PairBot:
 
         ticker = await self.exchange.async_fetch_ticker(self.pair)
         self.current_price = ticker["last"]
-
-        self.current_range = compute_dynamic_range(
-            df, self.current_price, self.config.atr,
-            self.config.grid.range_multiplier,
-            self.ml, self.config.ml,
-        )
 
         import numpy as _np
         ohlcv_arr = _np.array(ohlcv, dtype=_np.float64)
@@ -183,6 +238,50 @@ class PairBot:
             pair_count, min_notional, step_size,
         )
         self.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
+
+        # Try state recovery
+        pair_saved = (saved_state or {}).get("grid_state", {}).get(self.pair)
+        if pair_saved and alloc.grid_count >= 2:
+            recovered = await self._recover_orders(pair_saved)
+            if recovered:
+                unplaced = self.grid.get_levels_to_place()
+                if unplaced:
+                    try:
+                        await self.order_mgr.place_grid_orders(self.pair, self._entry_filter_dict())
+                    except Exception as e:
+                        logger.warning("Recovery re-place failed: %s", e)
+
+                self.current_range = self.current_range or compute_dynamic_range(
+                    df, self.current_price, self.config.atr,
+                    self.config.grid.range_multiplier, self.ml, self.config.ml,
+                )
+
+                actual_levels = len(self.grid.state.levels)
+                logger.info(
+                    "%s recovered: price=%.2f, %d levels, %d with orders",
+                    self.pair, self.current_price, actual_levels,
+                    sum(1 for l in self.grid.state.levels if l.order_id),
+                )
+                return
+
+        # Clean start: cancel old orders and build fresh grid
+        try:
+            old_orders = await self.exchange.async_fetch_open_orders(self.pair)
+            if old_orders:
+                for o in old_orders:
+                    try:
+                        await self.exchange.async_cancel_order(o["id"], self.pair)
+                    except Exception:
+                        pass
+                logger.info("%s: %d alte offene Orders gecancelt", self.pair, len(old_orders))
+        except Exception as e:
+            logger.warning("Alte Orders pruefen fehlgeschlagen: %s", e)
+
+        self.current_range = compute_dynamic_range(
+            df, self.current_price, self.config.atr,
+            self.config.grid.range_multiplier,
+            self.ml, self.config.ml,
+        )
 
         if alloc.grid_count < 2:
             logger.warning("%s: Nicht genug Kapital fuer Grid (Equity: %.2f)", self.pair, alloc.total_equity)
@@ -557,10 +656,14 @@ class MultiPairBot:
                           self.tracker, self.telegram, ml, self.cloud)
             self.pair_bots[pair] = bot
 
+        saved_state = await self.cloud.load_state() if self.cloud.connected else None
+        if saved_state:
+            self.trailing_tp.deserialize(saved_state.get("trailing_tps", []))
+
         pair_count = len(self.pair_bots)
         for pair, bot in self.pair_bots.items():
             try:
-                await bot.initialize(self.allocator, pair_count)
+                await bot.initialize(self.allocator, pair_count, saved_state)
             except Exception as e:
                 logger.error("Failed to initialize %s [%s]: %s", pair, type(e).__name__, e or "(kein Detail)")
                 import traceback
@@ -918,7 +1021,40 @@ class MultiPairBot:
                 wallet = await self._fetch_wallet()
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
+                await self._persist_state()
+
             await asyncio.sleep(60)
+
+    async def _persist_state(self):
+        """Save current grid state + trailing TPs for crash recovery."""
+        try:
+            grid_state: dict = {}
+            last_prices: dict = {}
+            for pair, bot in self.pair_bots.items():
+                last_prices[pair] = bot.current_price
+                levels = []
+                for l in bot.grid.state.levels:
+                    levels.append({
+                        "price": l.price, "side": l.side, "amount": l.amount,
+                        "index": l.index, "order_id": l.order_id, "filled": l.filled,
+                    })
+                rng = bot.current_range
+                grid_state[pair] = {
+                    "levels": levels,
+                    "range": {
+                        "upper": rng.upper, "lower": rng.lower,
+                        "mid": rng.mid, "atr": rng.atr, "source": rng.source,
+                    } if rng else None,
+                    "regime": bot.regime.regime.value,
+                }
+
+            await self.cloud.save_state({
+                "grid_state": grid_state,
+                "trailing_tps": self.trailing_tp.serialize(),
+                "last_prices": last_prices,
+            })
+        except Exception as e:
+            logger.debug("State persist failed: %s", e)
 
     async def _optimization_loop(self):
         """Self-optimize every 6 hours based on recent performance."""
@@ -1262,7 +1398,7 @@ class MultiPairBot:
                               self.tracker, self.telegram, ml, self.cloud)
                 self.pair_bots[pair] = bot
                 try:
-                    await bot.initialize(self.allocator, len(self.pair_bots))
+                    await bot.initialize(self.allocator, len(self.pair_bots), None)
                     logger.info("%s hinzugefuegt und initialisiert", pair)
                 except Exception as e:
                     logger.error("Initialisierung von %s fehlgeschlagen: %s", pair, e)
