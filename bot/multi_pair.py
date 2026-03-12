@@ -677,27 +677,63 @@ class MultiPairBot:
         """Trailing TP is active except in VOLATILE regime."""
         return bot.regime.regime != Regime.VOLATILE
 
-    async def _place_counter_order(self, pair: str, bot: PairBot, opposite):
-        """Place a fixed limit counter-order (classic behaviour)."""
+    async def _place_counter_order(self, pair: str, bot: PairBot, opposite,
+                                    fill_price: float = 0.0):
+        """Place a smart limit counter-order adjusted to current price.
+
+        The counter price is pushed away from the fill price to guarantee
+        profit above fees, and the amount is increased by 10% when the price
+        already moved 1%+ in the profitable direction (pyramid on winners).
+        """
+        current = bot.current_price or 0
+        fee_rate = OrderManager.FEE_RATE
+        min_profit_spacing = fee_rate * 2 * 1.5
+
+        grid_price = opposite.price
+        amount = opposite.amount
+
+        if opposite.side == "sell":
+            smart_price = current * (1 + min_profit_spacing)
+            price = max(grid_price, smart_price)
+            if fill_price and current > 0:
+                move_pct = (current - fill_price) / fill_price
+                if move_pct > 0.01:
+                    amount = float(self.exchange.amount_to_precision(pair, amount * 1.10))
+        else:
+            smart_price = current * (1 - min_profit_spacing)
+            price = min(grid_price, smart_price)
+            if fill_price and current > 0:
+                move_pct = (fill_price - current) / fill_price
+                if move_pct > 0.01:
+                    amount = float(self.exchange.amount_to_precision(pair, amount * 1.10))
+
+        price = float(self.exchange.price_to_precision(pair, price))
+
         try:
             if opposite.side == "buy":
-                order = await self.exchange.async_create_limit_buy(
-                    pair, opposite.amount, opposite.price)
+                order = await self.exchange.async_create_limit_buy(pair, amount, price)
             else:
-                order = await self.exchange.async_create_limit_sell(
-                    pair, opposite.amount, opposite.price)
+                order = await self.exchange.async_create_limit_sell(pair, amount, price)
             opposite.order_id = order["id"]
+            opposite.price = price
+            opposite.amount = amount
             bot.order_mgr.orders[order["id"]] = OrderManager.create_managed(
                 order["id"], pair, opposite)
-            bot.risk.add_trailing_stop(opposite.level_id, opposite.side, opposite.price, pair=pair)
-            logger.info("Gegenseite platziert: %s %s @ %.2f", opposite.side, pair, opposite.price)
+            bot.risk.add_trailing_stop(opposite.level_id, opposite.side, price, pair=pair)
+            if price != grid_price:
+                logger.info("Smart-Gegenseite: %s %s %.8f @ %.2f (Grid: %.2f, Anpassung: +%.3f%%)",
+                            opposite.side, pair, amount, price, grid_price,
+                            abs(price - grid_price) / grid_price * 100)
+            else:
+                logger.info("Gegenseite platziert: %s %s %.8f @ %.2f", opposite.side, pair, amount, price)
         except Exception as e:
             logger.warning("Gegenseite fehlgeschlagen: %s %s @ %.2f: %s",
-                           opposite.side, pair, opposite.price, e)
+                           opposite.side, pair, price, e)
             if self.cloud.connected:
                 asyncio.create_task(self.cloud.log_event(
-                    "error", f"Gegenseite fehlgeschlagen: {opposite.side} @ {opposite.price:.2f}",
-                    {"pair": pair, "side": opposite.side, "price": opposite.price, "reason": str(e)},
+                    "error", f"Gegenseite fehlgeschlagen: {opposite.side} @ {price:.2f}",
+                    {"pair": pair, "side": opposite.side, "price": price,
+                     "grid_price": grid_price, "reason": str(e)},
                     level="warn",
                 ))
 
@@ -769,7 +805,7 @@ class MultiPairBot:
                                 managed.amount, opposite.price,
                             )
                         elif opposite:
-                            await self._place_counter_order(pair, bot, opposite)
+                            await self._place_counter_order(pair, bot, opposite, managed.fill_price)
 
                     # Check trailing take-profits
                     triggered, fallbacks = self.trailing_tp.check(pair, price)
