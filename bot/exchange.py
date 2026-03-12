@@ -124,9 +124,12 @@ class Exchange:
     @staticmethod
     def _step_format(value: float, step: float) -> str:
         """Truncate value to step-size precision and return as string."""
-        if step <= 0 or step >= 1:
+        if step <= 0:
+            return f"{value:.8f}"
+        if step >= 1:
             return str(int(value))
-        decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[1]))
+        step_str = f"{step:.12f}".rstrip("0")
+        decimals = max(0, len(step_str.split(".")[1])) if "." in step_str else 0
         truncated = int(value / step) * step
         return f"{truncated:.{decimals}f}"
 

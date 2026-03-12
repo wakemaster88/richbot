@@ -118,6 +118,8 @@ class TrailingTakeProfit:
         if price > entry.highest:
             entry.highest = price
 
+        if entry.entry_price <= 0:
+            return
         profit_pct = (price - entry.entry_price) / entry.entry_price
 
         # Stop-loss
@@ -149,6 +151,8 @@ class TrailingTakeProfit:
         if entry.lowest == 0 or price < entry.lowest:
             entry.lowest = price
 
+        if entry.entry_price <= 0:
+            return
         profit_pct = (entry.entry_price - price) / entry.entry_price
 
         # Stop-loss (price went up after we sold)

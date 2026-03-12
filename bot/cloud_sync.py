@@ -69,6 +69,12 @@ class CloudSync:
             logger.info("Cloud sync connected (bot_id=%s)", self.bot_id)
         except Exception as e:
             logger.error("Cloud sync start failed: %s", e)
+            if self._pool:
+                try:
+                    await self._pool.close()
+                except Exception:
+                    pass
+                self._pool = None
 
     async def fetch_env(self, force: bool = False) -> dict[str, str]:
         """Fetch secrets from Neon and inject into os.environ. Returns loaded keys."""
@@ -211,9 +217,9 @@ class CloudSync:
             logger.warning("Config fetch failed: %s", e)
         return None
 
-    async def save_state(self, state: dict):
+    async def save_state(self, state: dict | None):
         """Persist bot state for recovery after restart."""
-        if not self._pool:
+        if not self._pool or not state:
             return
         try:
             async with self._pool.acquire() as conn:
@@ -253,10 +259,18 @@ class CloudSync:
                     logger.info("Saved state too old (%.0fs > %ds), clean start", age, max_age_sec)
                     return None
                 logger.info("Loaded saved state (age: %.0fs)", age)
+
+                def _parse_jsonb(val, default=None):
+                    if val is None:
+                        return default if default is not None else {}
+                    if isinstance(val, (dict, list)):
+                        return val
+                    return json.loads(val) if isinstance(val, str) else (default or {})
+
                 return {
-                    "grid_state": json.loads(row["grid_state"]) if row["grid_state"] else {},
-                    "trailing_tps": json.loads(row["trailing_tps"]) if row["trailing_tps"] else [],
-                    "last_prices": json.loads(row["last_prices"]) if row["last_prices"] else {},
+                    "grid_state": _parse_jsonb(row["grid_state"], {}),
+                    "trailing_tps": _parse_jsonb(row["trailing_tps"], []),
+                    "last_prices": _parse_jsonb(row["last_prices"], {}),
                 }
         except Exception as e:
             logger.warning("State load failed: %s", e)
@@ -273,7 +287,7 @@ class CloudSync:
                     "INSERT INTO bot_events (id, bot_id, level, category, message, detail) "
                     "VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
                     _uid(), self.bot_id, level, category, message,
-                    json.dumps(detail) if detail else None,
+                    json.dumps(detail) if detail is not None else None,
                 )
         except Exception:
             pass

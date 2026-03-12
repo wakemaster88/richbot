@@ -22,7 +22,7 @@ from bot.grid_engine import GridEngine
 from bot.ml_predictor import LSTMPredictor
 from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
-from bot.regime_detector import Regime, RegimeDetector, RegimeParams
+from bot.regime_detector import Regime, RegimeDetector
 from bot.risk_manager import RiskManager
 from bot.self_optimizer import SelfOptimizer
 from bot.telegram_bot import TelegramNotifier
@@ -1212,20 +1212,25 @@ class MultiPairBot:
             balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
             total_usdc = 0.0
             balances: dict[str, float] = {}
+            seen_assets: set[str] = set()
 
             for pair, bot in self.pair_bots.items():
                 base = pair.split("/")[0]
                 quote = pair.split("/")[1]
                 price = bot.current_price or 0
 
-                q = balance.get(quote, {})
-                balances[quote] = q.get("total", 0)
-                total_usdc = q.get("total", 0)
+                if quote not in seen_assets:
+                    q = balance.get(quote, {})
+                    balances[quote] = q.get("total", 0)
+                    total_usdc += balances[quote]
+                    seen_assets.add(quote)
 
-                b = balance.get(base, {})
-                b_total = b.get("total", 0)
-                balances[base] = b_total
-                total_usdc += b_total * price
+                if base not in seen_assets:
+                    b = balance.get(base, {})
+                    b_total = b.get("total", 0)
+                    balances[base] = b_total
+                    total_usdc += b_total * price
+                    seen_assets.add(base)
 
             for pair, bot in self.pair_bots.items():
                 summary = self.tracker.get_summary(pair)
@@ -1235,7 +1240,7 @@ class MultiPairBot:
                 buys = sum(1 for o in open_orders if o.side == "buy")
                 sells = active - buys
 
-                await self.cloud.log_event(
+                asyncio.create_task(self.cloud.log_event(
                     "snapshot",
                     f"{pair} — {active}/{total_levels} Grid, PnL {summary['realized_pnl']:.4f}",
                     {
@@ -1262,7 +1267,7 @@ class MultiPairBot:
                         "balances": balances,
                         "issue": bot._grid_issue or None,
                     },
-                )
+                ))
         except Exception as e:
             logger.debug("Analytics snapshot failed: %s", e)
 
