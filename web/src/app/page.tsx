@@ -61,6 +61,13 @@ interface AnalyticsData {
   snapshots: { timestamp: string; detail: Record<string, unknown> }[];
 }
 
+interface PiSystem {
+  cpu_temp?: number; cpu_percent?: number; ram_total_mb?: number; ram_used_mb?: number;
+  ram_percent?: number; load_1m?: number; disk_total_gb?: number; disk_used_gb?: number;
+  disk_percent?: number; hostname?: string; rss_kb?: number; public_ip?: string;
+}
+interface PiStatus { connected: boolean; lastSeen?: string; uptime?: number; system: PiSystem | null; }
+
 // -- Demo Data --
 
 function generateDemoEquity(): EquityPoint[] {
@@ -197,20 +204,85 @@ function StatusBadge({ status, hb }: { status: string; hb: string }) {
   );
 }
 
-function MiniStat({ label, wert, farbe }: { label: string; wert: string; farbe?: string }) {
-  return (
-    <div className="card-inner px-3 py-2.5">
-      <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-medium">{label}</p>
-      <p className={`text-[15px] font-bold font-mono tracking-tight mt-0.5 ${farbe || "text-[var(--text-primary)]"}`}>{wert}</p>
-    </div>
-  );
-}
-
 const COIN_COLORS: Record<string, string> = {
   USDC: "var(--up)", BTC: "#f7931a", SOL: "#9945ff", ETH: "#627eea",
 };
 
-function WalletUebersicht({ wallet }: { wallet: WalletData }) {
+// -- Portfolio Hero --
+
+function PortfolioHero({ walletTotal, totalPnl, trades, quoteCcy, pairs }: {
+  walletTotal: number; totalPnl: number; trades: Trade[]; quoteCcy: string;
+  pairs: [string, PairMetrics][];
+}) {
+  const now = Date.now();
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
+  if (weekStart > todayStart) weekStart.setDate(weekStart.getDate() - 7);
+
+  const todayPnl = trades.filter(t => new Date(t.timestamp).getTime() >= todayStart.getTime()).reduce((s, t) => s + (t.pnl || 0), 0);
+  const weekPnl = trades.filter(t => new Date(t.timestamp).getTime() >= weekStart.getTime()).reduce((s, t) => s + (t.pnl || 0), 0);
+  const avgSharpe = pairs.length > 0 ? pairs.reduce((s, [, m]) => s + (m.sharpe_ratio || 0), 0) / pairs.length : 0;
+
+  return (
+    <div className="card p-5 sm:p-6 mb-4 fade-in">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-5">
+        <div>
+          <p className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.15em] font-semibold mb-1">Portfolio-Wert</p>
+          <div className="flex items-baseline gap-3">
+            <span className="text-3xl sm:text-4xl font-bold font-mono tracking-tight">{fmt(walletTotal)}</span>
+            <span className="text-sm text-[var(--text-tertiary)]">{quoteCcy}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {pairs.map(([p, m]) => {
+            const regimeKey = m.regime?.regime || "ranging";
+            const rs = REGIME_STYLE[regimeKey] || REGIME_STYLE.ranging;
+            return (
+              <span key={p} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[9px] font-bold"
+                style={{ background: rs.bg, color: rs.color }}>
+                {p.split("/")[0]} {rs.label}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        <PnlCard label="Heute" value={todayPnl} quoteCcy={quoteCcy} />
+        <PnlCard label="Diese Woche" value={weekPnl} quoteCcy={quoteCcy} />
+        <PnlCard label="Gesamt" value={totalPnl} quoteCcy={quoteCcy} />
+        <div className="card-inner px-3 py-2.5">
+          <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-medium">Sharpe</p>
+          <p className={`text-[15px] font-bold font-mono tracking-tight mt-0.5 ${avgSharpe >= 1 ? "text-[var(--up)]" : "text-[var(--text-primary)]"}`}>
+            {avgSharpe.toFixed(2)}
+          </p>
+        </div>
+        <div className="card-inner px-3 py-2.5">
+          <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-medium">Drawdown</p>
+          <p className="text-[15px] font-bold font-mono tracking-tight mt-0.5 text-[var(--warn)]">
+            {fmt(Math.max(...pairs.map(([, m]) => m.max_drawdown_pct || 0), 0))}%
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PnlCard({ label, value, quoteCcy }: { label: string; value: number; quoteCcy: string }) {
+  const up = value >= 0;
+  return (
+    <div className="card-inner px-3 py-2.5">
+      <p className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-medium">{label}</p>
+      <p className={`text-[15px] font-bold font-mono tracking-tight mt-0.5 ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
+        {up ? "+" : ""}{fmt(value, 4)}
+      </p>
+    </div>
+  );
+}
+
+// -- Wallet with Target Ratio --
+
+function WalletUebersicht({ wallet, targetRatio }: { wallet: WalletData; targetRatio?: number }) {
   const total = wallet._total_usdc ?? 0;
   const coins = Object.entries(wallet)
     .filter(([k]) => !k.startsWith("_"))
@@ -221,22 +293,35 @@ function WalletUebersicht({ wallet }: { wallet: WalletData }) {
     })
     .sort((a, b) => b.usdc_value - a.usdc_value);
 
+  const usdcPct = coins.find(c => c.symbol === "USDC")?.pct ?? 0;
+
   return (
     <div className="card p-4 sm:p-5 mb-3 fade-in">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Wallet</h3>
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Kapital-Verteilung</h3>
         <span className="text-base font-bold font-mono">{fmt(total, 2)} <span className="text-[10px] text-[var(--text-tertiary)]">USDC</span></span>
       </div>
 
-      {/* Balance bar */}
-      <div className="h-2 rounded-full overflow-hidden flex mb-3" style={{ background: "var(--bg-secondary)" }}>
-        {coins.map((c) => (
-          <div key={c.symbol} style={{ width: `${Math.max(c.pct, 1)}%`, background: COIN_COLORS[c.symbol] || "var(--text-tertiary)" }}
-            className="transition-all duration-500" />
-        ))}
+      <div className="relative mb-3">
+        <div className="h-3 rounded-full overflow-hidden flex" style={{ background: "var(--bg-secondary)" }}>
+          {coins.map((c) => (
+            <div key={c.symbol} style={{ width: `${Math.max(c.pct, 1)}%`, background: COIN_COLORS[c.symbol] || "var(--text-tertiary)" }}
+              className="transition-all duration-500" />
+          ))}
+        </div>
+        {targetRatio != null && targetRatio > 0 && (
+          <div className="absolute top-0 h-3 border-r-2 border-dashed"
+            style={{ left: `${targetRatio * 100}%`, borderColor: "var(--accent)" }}
+            title={`Ziel USDC: ${(targetRatio * 100).toFixed(0)}%`} />
+        )}
       </div>
+      {targetRatio != null && (
+        <div className="flex items-center gap-2 text-[9px] text-[var(--text-quaternary)] mb-3">
+          <span className="w-3 h-0 border-t-2 border-dashed" style={{ borderColor: "var(--accent)" }} />
+          <span>Ziel-Ratio USDC: <strong className="text-[var(--text-tertiary)]">{(targetRatio * 100).toFixed(0)}%</strong> (aktuell: {usdcPct.toFixed(0)}%)</span>
+        </div>
+      )}
 
-      {/* Coin rows */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         {coins.map((c) => (
           <div key={c.symbol} className="flex items-center gap-2.5 px-3 py-2 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
@@ -253,7 +338,7 @@ function WalletUebersicht({ wallet }: { wallet: WalletData }) {
                 <span className="text-[10px] text-[var(--text-quaternary)] font-mono">{c.pct.toFixed(1)}%</span>
               </div>
               <div className="flex items-center justify-between text-[9px] text-[var(--text-quaternary)]">
-                <span>≈ {fmt(c.usdc_value, 2)} USDC</span>
+                <span>{"\u2248"} {fmt(c.usdc_value, 2)} USDC</span>
                 {c.locked > 0 && <span className="text-[var(--warn)]">{c.symbol === "USDC" ? fmt(c.locked, 2) : c.locked.toFixed(6)} gesperrt</span>}
               </div>
             </div>
@@ -264,12 +349,89 @@ function WalletUebersicht({ wallet }: { wallet: WalletData }) {
   );
 }
 
-function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; quote?: string }) {
+// -- Grid Visualization --
+
+function GridVisualisierung({ m }: { m: PairMetrics }) {
+  const orders = m.open_orders || [];
+  if (!orders.length && !m.price) return null;
+
+  const buys = orders.filter(o => o.side === "buy").sort((a, b) => b.price - a.price);
+  const sells = orders.filter(o => o.side === "sell").sort((a, b) => a.price - b.price);
+  const allPrices = [...orders.map(o => o.price), m.price].filter(Boolean);
+  const mn = Math.min(...allPrices);
+  const mx = Math.max(...allPrices);
+  const spread = mx - mn || 1;
+
+  const priceToPct = (p: number) => ((p - mn) / spread) * 100;
+
+  return (
+    <div className="card p-4 sm:p-5 fade-in">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Grid-Orders</h3>
+        <span className="text-[9px] text-[var(--text-quaternary)] font-mono">
+          {buys.length}B / {sells.length}S = {orders.length}/{m.grid_configured || m.grid_levels}
+        </span>
+      </div>
+
+      {m.grid_issue && (
+        <div className="mb-3 px-2.5 py-1.5 rounded-md text-[9px] flex items-center gap-1.5"
+          style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
+          <span className="font-semibold shrink-0">{m.unplaced_orders || "?"} blockiert:</span>
+          <span className="truncate">{simplifyError(m.grid_issue)}</span>
+        </div>
+      )}
+
+      <div className="relative h-48 rounded-lg overflow-hidden" style={{ background: "var(--bg-secondary)" }}>
+        {/* Price axis labels */}
+        <div className="absolute left-0 top-0 bottom-0 w-14 flex flex-col justify-between py-2 text-[8px] font-mono text-[var(--text-quaternary)] z-10">
+          <span>{fmt(mx, 0)}</span>
+          <span>{fmt((mx + mn) / 2, 0)}</span>
+          <span>{fmt(mn, 0)}</span>
+        </div>
+
+        {/* Order markers */}
+        <div className="absolute left-14 right-0 top-0 bottom-0">
+          {sells.map((o, i) => (
+            <div key={`s-${i}`} className="absolute right-0 h-[2px] transition-all"
+              style={{ bottom: `${priceToPct(o.price)}%`, left: 0, background: "var(--down)", opacity: 0.7 }}>
+              <span className="absolute -top-2.5 right-1 text-[7px] font-mono text-[var(--down)]">V {fmt(o.price, 0)}</span>
+            </div>
+          ))}
+          {buys.map((o, i) => (
+            <div key={`b-${i}`} className="absolute right-0 h-[2px] transition-all"
+              style={{ bottom: `${priceToPct(o.price)}%`, left: 0, background: "var(--up)", opacity: 0.7 }}>
+              <span className="absolute -top-2.5 left-1 text-[7px] font-mono text-[var(--up)]">K {fmt(o.price, 0)}</span>
+            </div>
+          ))}
+          {/* Current price */}
+          {m.price > 0 && (
+            <div className="absolute right-0 h-[3px]" style={{ bottom: `${priceToPct(m.price)}%`, left: 0, background: "var(--accent)", zIndex: 5 }}>
+              <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-[8px] font-mono font-bold px-1 rounded"
+                style={{ background: "var(--accent)", color: "var(--bg-primary)" }}>
+                {fmt(m.price, 0)}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 mt-2 text-[9px] text-[var(--text-quaternary)]">
+        <span className="flex items-center gap-1"><span className="w-3 h-[2px] rounded" style={{ background: "var(--up)" }} /> Kaufen ({buys.length})</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-[2px] rounded" style={{ background: "var(--down)" }} /> Verkaufen ({sells.length})</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-[3px] rounded" style={{ background: "var(--accent)" }} /> Preis</span>
+        <span className="ml-auto font-mono">{m.range}</span>
+      </div>
+    </div>
+  );
+}
+
+// -- Pair Info Card (compact) --
+
+function PairInfoCard({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; quote?: string }) {
   const up = m.total_pnl >= 0;
 
   return (
     <div className="card p-4 sm:p-5 fade-in">
-      {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[10px]" style={{ background: up ? "var(--up-bg)" : "var(--down-bg)", color: up ? "var(--up)" : "var(--down)" }}>
@@ -288,45 +450,27 @@ function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; 
         </div>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-3 gap-2 mb-3">
-        <MiniStat label="Grid" wert={`${m.active_orders}/${m.grid_configured || m.grid_levels}${m.grid_buy_count != null ? ` (${m.grid_buy_count}B/${m.grid_sell_count}S)` : ""}`}
-          farbe={m.active_orders < (m.grid_configured || m.grid_levels) ? "text-[var(--warn)]" : undefined} />
-        <MiniStat label="Trades" wert={`${m.trade_count}`} />
-        <MiniStat label="Drawdown" wert={`${fmt(m.max_drawdown_pct)}%`} farbe="text-[var(--warn)]" />
+      <div className="grid grid-cols-4 gap-2 mb-3">
+        <div className="card-inner px-2 py-1.5 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Grid</p>
+          <p className="text-[12px] font-bold font-mono">{m.active_orders}/{m.grid_configured || m.grid_levels}</p>
+        </div>
+        <div className="card-inner px-2 py-1.5 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Trades</p>
+          <p className="text-[12px] font-bold font-mono">{m.trade_count}</p>
+        </div>
+        <div className="card-inner px-2 py-1.5 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Sharpe</p>
+          <p className={`text-[12px] font-bold font-mono ${m.sharpe_ratio >= 1 ? "text-[var(--up)]" : ""}`}>{m.sharpe_ratio.toFixed(2)}</p>
+        </div>
+        <div className="card-inner px-2 py-1.5 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">DD</p>
+          <p className="text-[12px] font-bold font-mono text-[var(--warn)]">{fmt(m.max_drawdown_pct)}%</p>
+        </div>
       </div>
 
-      {/* Grid Issue */}
-      {m.grid_issue && (
-        <div className="mb-3 px-2.5 py-1.5 rounded-md text-[9px] flex items-center gap-1.5"
-          style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
-          <span className="font-semibold shrink-0">{m.unplaced_orders || "?"} Order(s) blockiert:</span>
-          <span className="truncate">{simplifyError(m.grid_issue)}</span>
-        </div>
-      )}
-
-      {/* Open Orders */}
-      {m.open_orders && m.open_orders.length > 0 && (
-        <div className="pt-3 border-t border-[var(--border-subtle)]">
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-1.5">Offene Orders</p>
-          <div className="grid grid-cols-2 gap-1">
-            {m.open_orders.map((o) => {
-              const isBuy = o.side === "buy";
-              const dist = m.price > 0 ? ((o.price - m.price) / m.price * 100) : 0;
-              return (
-                <div key={o.id} className="flex items-center justify-between text-[10px] font-mono px-2 py-1 rounded-md" style={{ background: isBuy ? "var(--up-bg)" : "var(--down-bg)" }}>
-                  <span style={{ color: isBuy ? "var(--up)" : "var(--down)" }}>{isBuy ? "K" : "V"} {fmt(o.price, 0)}</span>
-                  <span className="text-[var(--text-quaternary)]">{dist >= 0 ? "+" : ""}{dist.toFixed(1)}%</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Footer */}
       {(m.annualized_return_pct || m.fees_paid) && (
-        <div className="flex items-center gap-3 mt-3 pt-3 border-t border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)]">
+        <div className="flex items-center gap-3 pt-2 border-t border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)]">
           {m.annualized_return_pct !== undefined && <span>Rendite: <strong className="text-[var(--text-tertiary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
           {m.fees_paid !== undefined && <span>Gebuehren: <strong className="text-[var(--text-tertiary)]">{fmt(m.fees_paid)}</strong></span>}
           <span>Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity)}</strong></span>
@@ -335,6 +479,8 @@ function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; 
     </div>
   );
 }
+
+// -- Charts --
 
 function EquityChart({ data, quote = "USDC" }: { data: EquityPoint[]; quote?: string }) {
   const cd = data.map((d) => ({
@@ -406,6 +552,8 @@ function PnlChart({ data, quote = "USDC" }: { data: { zeit: string; pnl: number 
     </div>
   );
 }
+
+// -- Price Chart --
 
 interface Kline { t: number; o: number; h: number; l: number; c: number; v: number; }
 
@@ -547,178 +695,13 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
   );
 }
 
-function AnalyticsPanel({ data }: { data: AnalyticsData }) {
-  const s = data.summary;
-  if (!s) return null;
+// -- Trades with Trailing-TP Info --
 
-  const pairEntries = Object.entries(data.pair_stats);
-
-  return (
-    <div className="card p-4 sm:p-5 fade-in">
-      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-4">Analyse</h3>
-
-      {/* KPIs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Win-Rate</p>
-          <p className={`text-sm font-bold font-mono ${s.win_rate >= 50 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
-            {s.win_rate.toFixed(1)}%
-          </p>
-          <p className="text-[9px] text-[var(--text-quaternary)]">{s.wins}W / {s.losses}L</p>
-        </div>
-        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Netto PnL</p>
-          <p className={`text-sm font-bold font-mono ${s.net_pnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
-            {s.net_pnl >= 0 ? "+" : ""}{fmt(s.net_pnl, 4)}
-          </p>
-          <p className="text-[9px] text-[var(--text-quaternary)]">Gebuehren: {fmt(s.total_fees, 4)}</p>
-        </div>
-        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Profit-Faktor</p>
-          <p className={`text-sm font-bold font-mono ${s.profit_factor >= 1 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
-            {s.profit_factor.toFixed(2)}
-          </p>
-          <p className="text-[9px] text-[var(--text-quaternary)]">Ø +{fmt(s.avg_win, 4)} / {fmt(s.avg_loss, 4)}</p>
-        </div>
-        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Streaks</p>
-          <p className="text-sm font-bold font-mono text-[var(--text-primary)]">
-            <span className="text-[var(--up)]">{s.max_win_streak}</span>
-            <span className="text-[var(--text-quaternary)]"> / </span>
-            <span className="text-[var(--down)]">{s.max_loss_streak}</span>
-          </p>
-          <p className="text-[9px] text-[var(--text-quaternary)]">{s.total_trades} Trades</p>
-        </div>
-      </div>
-
-      {/* Per-Pair Stats */}
-      {pairEntries.length > 0 && (
-        <div className="mb-4">
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">Pro Pair</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-            {pairEntries.map(([pair, ps]) => {
-              const wr = ps.trades > 0 ? (ps.wins / ps.trades * 100) : 0;
-              return (
-                <div key={pair} className="flex items-center justify-between px-3 py-2 rounded-lg text-[10px] font-mono" style={{ background: "var(--bg-secondary)" }}>
-                  <span className="font-semibold text-[var(--text-primary)]">{pair}</span>
-                  <div className="flex items-center gap-3 text-[var(--text-tertiary)]">
-                    <span>{ps.trades} Trades</span>
-                    <span className={wr >= 50 ? "text-[var(--up)]" : "text-[var(--down)]"}>{wr.toFixed(0)}%</span>
-                    <span className={ps.pnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}>
-                      {ps.pnl >= 0 ? "+" : ""}{fmt(ps.pnl, 4)}
-                    </span>
-                    <span>Vol: {fmt(ps.volume, 2)}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Hourly PnL Heatmap */}
-      {data.hourly_pnl.length > 0 && (
-        <div className="mb-4">
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">PnL pro Stunde</p>
-          <div className="flex flex-wrap gap-0.5">
-            {data.hourly_pnl.slice(-24).map((h) => {
-              const intensity = Math.min(Math.abs(h.pnl) * 500, 1);
-              const col = h.pnl >= 0 ? `rgba(16,185,129,${0.15 + intensity * 0.85})` : `rgba(239,68,68,${0.15 + intensity * 0.85})`;
-              const label = h.hour.slice(11, 13) + "h";
-              return (
-                <div key={h.hour} className="flex flex-col items-center gap-0.5" title={`${label}: ${h.pnl >= 0 ? "+" : ""}${h.pnl.toFixed(4)} (${h.count} Trades)`}>
-                  <div className="w-5 h-5 rounded-sm" style={{ background: col }} />
-                  <span className="text-[7px] text-[var(--text-quaternary)]">{label}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Event Activity 24h */}
-      {Object.keys(data.event_counts_24h).length > 0 && (
-        <div>
-          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">Events (24h)</p>
-          <div className="flex flex-wrap gap-1.5">
-            {Object.entries(data.event_counts_24h).map(([cat, count]) => (
-              <span key={cat} className="px-2 py-1 rounded text-[9px] font-mono" style={{ background: "var(--bg-secondary)", color: "var(--text-tertiary)" }}>
-                {cat}: <strong className="text-[var(--text-primary)]">{count}</strong>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-const EVT_ICONS: Record<string, string> = {
-  trade: "T", grid: "G", error: "!", config: "C", system: "S",
-  monitoring: "⚡", regime: "R", optimization: "⚙", trailing_tp: "↗", memory: "M",
-};
-const EVT_COLORS: Record<string, string> = {
-  trade: "var(--accent)", grid: "var(--cyan)", error: "var(--down)",
-  warn: "var(--warn)", critical: "#ef4444", success: "var(--up)",
-  config: "var(--text-secondary)", system: "var(--text-tertiary)",
-  monitoring: "var(--warn)", regime: "#3b82f6", optimization: "var(--accent)",
-  trailing_tp: "var(--up)", memory: "var(--warn)",
-};
-
-function AktivitaetsFeed({ events }: { events: BotEvent[] }) {
-  const [expanded, setExpanded] = useState(false);
-  const shown = expanded ? events : events.slice(0, 12);
-
-  if (!events.length) return null;
-
-  return (
-    <div className="card p-4 sm:p-5 h-full">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Aktivitaet</h3>
-        <span className="text-[9px] text-[var(--text-quaternary)]">{events.length}</span>
-      </div>
-      <div className="space-y-0.5 max-h-80 overflow-y-auto">
-        {shown.map((ev) => {
-          const levelColor = ev.level === "critical" ? "critical" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : ev.level === "success" ? "success" : "";
-          const col = EVT_COLORS[levelColor || ev.category] || "var(--text-tertiary)";
-          const icon = EVT_ICONS[ev.category] || "·";
-          const isCritical = ev.level === "critical";
-          const zeit = new Date(ev.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-          return (
-            <div key={ev.id} className="flex items-start gap-2 text-[10px] py-1.5 px-2 rounded hover:bg-[var(--bg-secondary)] transition-colors"
-              style={isCritical ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" } : undefined}>
-              <span className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold mt-0.5"
-                style={{ background: `color-mix(in srgb, ${col} 15%, transparent)`, color: col }}>
-                {icon}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-[var(--text-primary)] leading-snug">{ev.message}</p>
-                {ev.detail && (
-                  <p className="text-[9px] text-[var(--text-quaternary)] mt-0.5 font-mono truncate">
-                    {Object.entries(ev.detail as Record<string, unknown>)
-                      .filter(([k]) => !["pair"].includes(k))
-                      .slice(0, 4)
-                      .map(([k, v]) => `${k}: ${typeof v === "number" ? (Number.isInteger(v) ? v : (v as number).toFixed(4)) : v}`)
-                      .join(" · ")}
-                  </p>
-                )}
-              </div>
-              <span className="shrink-0 text-[9px] text-[var(--text-quaternary)] font-mono mt-0.5">{zeit}</span>
-            </div>
-          );
-        })}
-      </div>
-      {events.length > 12 && (
-        <button onClick={() => setExpanded(!expanded)}
-          className="mt-2 text-[10px] text-[var(--accent)] hover:underline w-full text-center">
-          {expanded ? "Weniger anzeigen" : `Alle ${events.length} Events anzeigen`}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: string }) {
+function TradesTabelle({ trades, trailingTp, quote = "USDC" }: {
+  trades: Trade[];
+  trailingTp?: { pair: string; side: string; entry_price: number; amount: number; highest: number; lowest: number; age_sec: number }[];
+  quote?: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? trades : trades.slice(0, 10);
 
@@ -736,6 +719,38 @@ function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: st
         <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Letzte Trades</h3>
         <span className="text-[9px] text-[var(--text-quaternary)] font-mono">{trades.length}</span>
       </div>
+
+      {/* Trailing-TP Active Entries */}
+      {trailingTp && trailingTp.length > 0 && (
+        <div className="px-4 py-2 border-b border-[var(--border-subtle)]" style={{ background: "rgba(59,130,246,0.05)" }}>
+          <p className="text-[9px] text-[#3b82f6] uppercase tracking-wider font-semibold mb-1.5">Trailing Take-Profit aktiv ({trailingTp.length})</p>
+          <div className="space-y-1">
+            {trailingTp.slice(0, 5).map((tp, i) => {
+              const isBuy = tp.side === "buy";
+              const extreme = isBuy ? tp.highest : tp.lowest;
+              const profitPct = isBuy
+                ? ((extreme - tp.entry_price) / tp.entry_price * 100)
+                : ((tp.entry_price - extreme) / tp.entry_price * 100);
+              return (
+                <div key={i} className="flex items-center gap-2 text-[10px] font-mono">
+                  <span className="px-1 py-0.5 rounded text-[8px] font-bold" style={{
+                    background: isBuy ? "var(--up-bg)" : "var(--down-bg)",
+                    color: isBuy ? "var(--up)" : "var(--down)",
+                  }}>{isBuy ? "K" : "V"}</span>
+                  <span className="text-[var(--text-tertiary)]">{tp.pair.split("/")[0]}</span>
+                  <span>{fmt(tp.entry_price, 0)}</span>
+                  <span className="text-[var(--text-quaternary)]">{"\u2192"}</span>
+                  <span className="text-[#3b82f6]">{fmt(extreme, 0)}</span>
+                  <span className={profitPct >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}>
+                    {profitPct >= 0 ? "+" : ""}{profitPct.toFixed(2)}%
+                  </span>
+                  <span className="text-[var(--text-quaternary)] ml-auto">{Math.floor(tp.age_sec / 60)}m</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Mobile */}
       <div className="sm:hidden divide-y divide-[var(--border-subtle)]">
@@ -807,6 +822,232 @@ function TradesTabelle({ trades, quote = "USDC" }: { trades: Trade[]; quote?: st
     </div>
   );
 }
+
+// -- Selbst-Optimierung Panel --
+
+function SelbstOptimierungPanel({ optData, pairs }: {
+  optData: { optimizations: BotEvent[]; regimes: BotEvent[]; pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }> };
+  pairs: [string, PairMetrics][];
+}) {
+  const lastOpt = optData.optimizations[0];
+
+  return (
+    <div className="card p-4 sm:p-5 fade-in">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-3">Selbst-Optimierung</h3>
+
+      {/* Capital Allocation bars */}
+      {pairs.length > 1 && (
+        <div className="mb-4">
+          <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider mb-1.5 font-semibold">Kapital-Allokation</div>
+          <div className="flex gap-1.5 h-5 rounded-md overflow-hidden" style={{ background: "var(--bg-secondary)" }}>
+            {pairs.map(([p, m], i) => {
+              const eq = m.allocation?.equity ?? m.current_equity ?? 0;
+              const totalEq = pairs.reduce((s, [, pm]) => s + (pm.allocation?.equity ?? pm.current_equity ?? 0), 0);
+              const pct = totalEq > 0 ? (eq / totalEq) * 100 : 100 / pairs.length;
+              const colors = ["#3b82f6", "var(--up)", "var(--warn)", "var(--accent)"];
+              return (
+                <div key={p} className="flex items-center justify-center text-[8px] font-bold text-white transition-all"
+                  style={{ width: `${pct}%`, background: colors[i % colors.length], minWidth: 30 }}>
+                  {p.split("/")[0]} {pct.toFixed(0)}%
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Per-pair: Entry Filter + Trailing TP */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+        {pairs.map(([p, m]) => {
+          const regimeKey = m.regime?.regime || "ranging";
+          const rs = REGIME_STYLE[regimeKey] || REGIME_STYLE.ranging;
+          const rsi = m.regime?.rsi ?? 50;
+          const ef = optData.pairRegimes[p];
+          const ttp = ef?.trailing_tp_active;
+          const allowBuys = regimeKey === "ranging" || regimeKey === "trend_up"
+            || (regimeKey === "trend_down" && rsi < 40) || (regimeKey === "volatile" && rsi < 30);
+          const allowSells = regimeKey === "ranging" || regimeKey === "trend_down"
+            || (regimeKey === "trend_up" && rsi > 60) || (regimeKey === "volatile" && rsi > 70);
+
+          return (
+            <div key={p} className="rounded-lg p-3" style={{ background: "var(--bg-secondary)" }}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[11px] font-bold">{p}</span>
+                <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold" style={{ background: rs.bg, color: rs.color }}>{rs.label}</span>
+              </div>
+              <div className="grid grid-cols-3 gap-1 text-[9px] mb-2">
+                <div className="text-center"><span className="text-[var(--text-quaternary)]">RSI</span> <span className="font-mono font-bold" style={{ color: rsi > 70 ? "var(--down)" : rsi < 30 ? "var(--up)" : "var(--text-secondary)" }}>{rsi.toFixed(0)}</span></div>
+                <div className="text-center"><span className="text-[var(--text-quaternary)]">ADX</span> <span className="font-mono font-bold">{(m.regime?.adx ?? 0).toFixed(0)}</span></div>
+                <div className="text-center"><span className="text-[var(--text-quaternary)]">BollW</span> <span className="font-mono font-bold">{(m.regime?.boll_width ?? 0).toFixed(3)}</span></div>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                <span className="px-1.5 py-0.5 rounded text-[8px] font-semibold" style={{ background: allowBuys ? "var(--up-bg)" : "var(--down-bg)", color: allowBuys ? "var(--up)" : "var(--down)" }}>Buys {allowBuys ? "\u2713" : "\u2717"}</span>
+                <span className="px-1.5 py-0.5 rounded text-[8px] font-semibold" style={{ background: allowSells ? "var(--up-bg)" : "var(--down-bg)", color: allowSells ? "var(--up)" : "var(--down)" }}>Sells {allowSells ? "\u2713" : "\u2717"}</span>
+                {ttp !== undefined && (
+                  <span className="px-1.5 py-0.5 rounded text-[8px] font-semibold" style={{ background: ttp ? "rgba(59,130,246,0.12)" : "var(--bg-elevated)", color: ttp ? "#3b82f6" : "var(--text-tertiary)" }}>
+                    Trail-TP {ttp ? "AN" : "AUS"}{ef?.trailing_tp_count ? ` (${ef.trailing_tp_count})` : ""}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Last optimization + regime history */}
+      {lastOpt && (
+        <div className="rounded-lg p-2.5 mb-3" style={{ background: "var(--bg-secondary)" }}>
+          <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider mb-1 font-semibold">Letzte Anpassung</div>
+          <div className="text-[11px] text-[var(--text-secondary)]">{lastOpt.message}</div>
+          <div className="text-[9px] text-[var(--text-tertiary)] mt-0.5 font-mono">
+            {new Date(lastOpt.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+          </div>
+        </div>
+      )}
+      {optData.regimes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          <span className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-semibold self-center">Regime-Verlauf:</span>
+          {optData.regimes.slice(0, 5).map((ev) => {
+            const d = ev.detail as Record<string, string> | null;
+            const newR = d?.new || "ranging";
+            const s = REGIME_STYLE[newR] || REGIME_STYLE.ranging;
+            return (
+              <span key={ev.id} className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold"
+                style={{ background: s.bg, color: s.color }}>
+                {d?.pair?.split("/")[0]} {"\u2192"} {s.label}
+                <span className="ml-1 font-normal opacity-60">
+                  {new Date(ev.timestamp).toLocaleString("de-DE", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -- Bot Health --
+
+function BotGesundheit({ pi, status }: { pi: PiStatus | null; status: BotStatus }) {
+  const sys = pi?.system;
+
+  return (
+    <div className="card p-4 sm:p-5 fade-in">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-3">Bot-Gesundheit</h3>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="card-inner px-3 py-2 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Uptime</p>
+          <p className="text-[13px] font-bold font-mono mt-0.5">{laufzeit(status.startedAt)}</p>
+        </div>
+        <div className="card-inner px-3 py-2 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Memory</p>
+          <p className="text-[13px] font-bold font-mono mt-0.5" style={{
+            color: sys?.ram_percent && sys.ram_percent > 80 ? "var(--down)" : sys?.ram_percent && sys.ram_percent > 60 ? "var(--warn)" : "var(--text-primary)"
+          }}>
+            {sys?.rss_kb ? `${Math.round(sys.rss_kb / 1024)} MB` : sys?.ram_used_mb ? `${sys.ram_used_mb} MB` : "—"}
+          </p>
+        </div>
+        <div className="card-inner px-3 py-2 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">CPU / Temp</p>
+          <p className="text-[13px] font-bold font-mono mt-0.5" style={{
+            color: sys?.cpu_temp && sys.cpu_temp > 75 ? "var(--down)" : sys?.cpu_temp && sys.cpu_temp > 60 ? "var(--warn)" : "var(--text-primary)"
+          }}>
+            {sys?.cpu_percent != null ? `${sys.cpu_percent}%` : "—"}{sys?.cpu_temp != null ? ` / ${sys.cpu_temp}\u00B0C` : ""}
+          </p>
+        </div>
+        <div className="card-inner px-3 py-2 text-center">
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Version</p>
+          <p className="text-[13px] font-bold font-mono mt-0.5">
+            {status.version && status.version.length >= 7 ? status.version.slice(0, 7) : status.version || "—"}
+          </p>
+        </div>
+      </div>
+      {sys?.public_ip && (
+        <div className="mt-2 flex items-center gap-2 text-[9px] text-[var(--text-quaternary)]">
+          <span>IP: <span className="font-mono text-[var(--text-tertiary)] select-all">{sys.public_ip}</span></span>
+          {sys.disk_percent != null && <span className="ml-auto">Disk: {sys.disk_percent}%</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -- Activity Feed --
+
+const EVT_ICONS: Record<string, string> = {
+  trade: "T", grid: "G", error: "!", config: "C", system: "S",
+  monitoring: "\u26A1", regime: "R", optimization: "\u2699", trailing_tp: "\u2197", memory: "M",
+};
+const EVT_COLORS: Record<string, string> = {
+  trade: "var(--accent)", grid: "var(--cyan)", error: "var(--down)",
+  warn: "var(--warn)", critical: "#ef4444", success: "var(--up)",
+  config: "var(--text-secondary)", system: "var(--text-tertiary)",
+  monitoring: "var(--warn)", regime: "#3b82f6", optimization: "var(--accent)",
+  trailing_tp: "var(--up)", memory: "var(--warn)",
+};
+
+const REGIME_STYLE: Record<string, { label: string; color: string; bg: string }> = {
+  ranging:    { label: "SEITW\u00C4RTS", color: "var(--up)", bg: "var(--up-bg)" },
+  trend_up:   { label: "AUFW\u00C4RTS", color: "#3b82f6", bg: "rgba(59,130,246,0.12)" },
+  trend_down: { label: "ABW\u00C4RTS", color: "var(--warn)", bg: "var(--warn-bg)" },
+  volatile:   { label: "VOLATIL", color: "var(--down)", bg: "var(--down-bg)" },
+};
+
+function AktivitaetsFeed({ events }: { events: BotEvent[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? events : events.slice(0, 12);
+
+  if (!events.length) return null;
+
+  return (
+    <div className="card p-4 sm:p-5 h-full">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Aktivitaet</h3>
+        <span className="text-[9px] text-[var(--text-quaternary)]">{events.length}</span>
+      </div>
+      <div className="space-y-0.5 max-h-80 overflow-y-auto">
+        {shown.map((ev) => {
+          const levelColor = ev.level === "critical" ? "critical" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : ev.level === "success" ? "success" : "";
+          const col = EVT_COLORS[levelColor || ev.category] || "var(--text-tertiary)";
+          const icon = EVT_ICONS[ev.category] || "\u00B7";
+          const isCritical = ev.level === "critical";
+          const zeit = new Date(ev.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          return (
+            <div key={ev.id} className="flex items-start gap-2 text-[10px] py-1.5 px-2 rounded hover:bg-[var(--bg-secondary)] transition-colors"
+              style={isCritical ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" } : undefined}>
+              <span className="shrink-0 w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold mt-0.5"
+                style={{ background: `color-mix(in srgb, ${col} 15%, transparent)`, color: col }}>
+                {icon}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[var(--text-primary)] leading-snug">{ev.message}</p>
+                {ev.detail && (
+                  <p className="text-[9px] text-[var(--text-quaternary)] mt-0.5 font-mono truncate">
+                    {Object.entries(ev.detail as Record<string, unknown>)
+                      .filter(([k]) => !["pair"].includes(k))
+                      .slice(0, 4)
+                      .map(([k, v]) => `${k}: ${typeof v === "number" ? (Number.isInteger(v) ? v : (v as number).toFixed(4)) : v}`)
+                      .join(" \u00B7 ")}
+                  </p>
+                )}
+              </div>
+              <span className="shrink-0 text-[9px] text-[var(--text-quaternary)] font-mono mt-0.5">{zeit}</span>
+            </div>
+          );
+        })}
+      </div>
+      {events.length > 12 && (
+        <button onClick={() => setExpanded(!expanded)}
+          className="mt-2 text-[10px] text-[var(--accent)] hover:underline w-full text-center">
+          {expanded ? "Weniger anzeigen" : `Alle ${events.length} Events anzeigen`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// -- Controls --
 
 function Steuerung({ status, commands, onCommand }: {
   status: string; commands: CommandRecord[]; onCommand: (t: string) => void;
@@ -891,155 +1132,58 @@ function Steuerung({ status, commands, onCommand }: {
   );
 }
 
-// -- Bot Intelligence Panel --
+// -- Analytics --
 
-const REGIME_STYLE: Record<string, { label: string; color: string; bg: string }> = {
-  ranging:    { label: "SEITWÄRTS",   color: "var(--up)",   bg: "var(--up-bg)" },
-  trend_up:   { label: "AUFWÄRTS",    color: "#3b82f6",     bg: "rgba(59,130,246,0.12)" },
-  trend_down: { label: "ABWÄRTS",     color: "var(--warn)",  bg: "var(--warn-bg)" },
-  volatile:   { label: "VOLATIL",     color: "var(--down)",  bg: "var(--down-bg)" },
-};
-
-function BotIntelligenzPanel({
-  pairs,
-  optData,
-}: {
-  pairs: [string, PairMetrics][];
-  optData: {
-    optimizations: BotEvent[];
-    regimes: BotEvent[];
-    pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }>;
-  };
-}) {
-  const lastOpt = optData.optimizations[0];
+function AnalyticsPanel({ data }: { data: AnalyticsData }) {
+  const s = data.summary;
+  if (!s) return null;
 
   return (
-    <div className="card p-4 sm:p-5 mb-4">
-      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-3">
-        Bot-Intelligenz
-      </h3>
-
-      {/* Regime per pair */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
-        {pairs.map(([p, m]) => {
-          const regimeKey = m.regime?.regime || "ranging";
-          const rs = REGIME_STYLE[regimeKey] || REGIME_STYLE.ranging;
-          const rsi = m.regime?.rsi ?? 50;
-          const adx = m.regime?.adx ?? 0;
-          const ef = optData.pairRegimes[p];
-          const ttp = ef?.trailing_tp_active;
-
-          const allowBuys = regimeKey === "ranging" || regimeKey === "trend_up"
-            || (regimeKey === "trend_down" && rsi < 40)
-            || (regimeKey === "volatile" && rsi < 30);
-          const allowSells = regimeKey === "ranging" || regimeKey === "trend_down"
-            || (regimeKey === "trend_up" && rsi > 60)
-            || (regimeKey === "volatile" && rsi > 70);
-
-          return (
-            <div key={p} className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] font-bold text-[var(--text-primary)]">{p}</span>
-                <span className="inline-flex px-2 py-0.5 rounded text-[9px] font-bold uppercase"
-                  style={{ background: rs.bg, color: rs.color }}>
-                  {rs.label}
-                </span>
-              </div>
-
-              {/* Indicators */}
-              <div className="grid grid-cols-3 gap-2 mb-2">
-                <div>
-                  <div className="text-[8px] text-[var(--text-quaternary)] uppercase">RSI</div>
-                  <div className="font-mono text-[12px] font-bold" style={{
-                    color: rsi > 70 ? "var(--down)" : rsi < 30 ? "var(--up)" : "var(--text-secondary)"
-                  }}>{rsi.toFixed(0)}</div>
-                </div>
-                <div>
-                  <div className="text-[8px] text-[var(--text-quaternary)] uppercase">ADX</div>
-                  <div className="font-mono text-[12px] font-bold" style={{
-                    color: adx >= 25 ? "var(--accent)" : "var(--text-tertiary)"
-                  }}>{adx.toFixed(0)}</div>
-                </div>
-                <div>
-                  <div className="text-[8px] text-[var(--text-quaternary)] uppercase">Boll.W</div>
-                  <div className="font-mono text-[12px] font-bold text-[var(--text-secondary)]">
-                    {(m.regime?.boll_width ?? 0).toFixed(3)}
-                  </div>
-                </div>
-              </div>
-
-              {/* Entry Filter + Trailing TP */}
-              <div className="flex flex-wrap gap-1.5 text-[9px]">
-                <span className="inline-flex px-1.5 py-0.5 rounded font-semibold" style={{
-                  background: allowBuys ? "var(--up-bg)" : "var(--down-bg)",
-                  color: allowBuys ? "var(--up)" : "var(--down)",
-                }}>Buys {allowBuys ? "✓" : "✗"}</span>
-                <span className="inline-flex px-1.5 py-0.5 rounded font-semibold" style={{
-                  background: allowSells ? "var(--up-bg)" : "var(--down-bg)",
-                  color: allowSells ? "var(--up)" : "var(--down)",
-                }}>Sells {allowSells ? "✓" : "✗"}</span>
-                {ttp !== undefined && (
-                  <span className="inline-flex px-1.5 py-0.5 rounded font-semibold" style={{
-                    background: ttp ? "rgba(59,130,246,0.12)" : "var(--bg-secondary)",
-                    color: ttp ? "#3b82f6" : "var(--text-tertiary)",
-                  }}>Trail-TP {ttp ? "AN" : "AUS"}{ef?.trailing_tp_count ? ` (${ef.trailing_tp_count})` : ""}</span>
-                )}
-              </div>
-            </div>
-          );
-        })}
+    <div className="card p-4 sm:p-5 fade-in">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-4">Analyse</h3>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Win-Rate</p>
+          <p className={`text-sm font-bold font-mono ${s.win_rate >= 50 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>{s.win_rate.toFixed(1)}%</p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">{s.wins}W / {s.losses}L</p>
+        </div>
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Netto PnL</p>
+          <p className={`text-sm font-bold font-mono ${s.net_pnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>{s.net_pnl >= 0 ? "+" : ""}{fmt(s.net_pnl, 4)}</p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">Gebuehren: {fmt(s.total_fees, 4)}</p>
+        </div>
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Profit-Faktor</p>
+          <p className={`text-sm font-bold font-mono ${s.profit_factor >= 1 ? "text-[var(--up)]" : "text-[var(--down)]"}`}>{s.profit_factor.toFixed(2)}</p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">{"\u00D8"} +{fmt(s.avg_win, 4)} / {fmt(s.avg_loss, 4)}</p>
+        </div>
+        <div className="p-2.5 rounded-lg" style={{ background: "var(--bg-secondary)" }}>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-0.5">Streaks</p>
+          <p className="text-sm font-bold font-mono">
+            <span className="text-[var(--up)]">{s.max_win_streak}</span>
+            <span className="text-[var(--text-quaternary)]"> / </span>
+            <span className="text-[var(--down)]">{s.max_loss_streak}</span>
+          </p>
+          <p className="text-[9px] text-[var(--text-quaternary)]">{s.total_trades} Trades</p>
+        </div>
       </div>
 
-      {/* Capital Allocation bars */}
-      {pairs.length > 0 && (
-        <div className="mb-4">
-          <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider mb-1.5 font-semibold">Kapital-Allokation</div>
-          <div className="flex gap-1.5 h-5 rounded-md overflow-hidden" style={{ background: "var(--bg-secondary)" }}>
-            {pairs.map(([p, m], i) => {
-              const eq = m.allocation?.equity ?? m.current_equity ?? 0;
-              const totalEq = pairs.reduce((s, [, pm]) => s + (pm.allocation?.equity ?? pm.current_equity ?? 0), 0);
-              const pct = totalEq > 0 ? (eq / totalEq) * 100 : 100 / pairs.length;
-              const colors = ["#3b82f6", "var(--up)", "var(--warn)", "var(--accent)"];
+      {data.hourly_pnl.length > 0 && (
+        <div>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase tracking-[0.14em] font-semibold mb-2">PnL pro Stunde</p>
+          <div className="flex flex-wrap gap-0.5">
+            {data.hourly_pnl.slice(-24).map((h) => {
+              const intensity = Math.min(Math.abs(h.pnl) * 500, 1);
+              const col = h.pnl >= 0 ? `rgba(16,185,129,${0.15 + intensity * 0.85})` : `rgba(239,68,68,${0.15 + intensity * 0.85})`;
+              const label = h.hour.slice(11, 13) + "h";
               return (
-                <div key={p} className="flex items-center justify-center text-[8px] font-bold text-white transition-all"
-                  style={{ width: `${pct}%`, background: colors[i % colors.length], minWidth: 30 }}>
-                  {p.split("/")[0]} {pct.toFixed(0)}%
+                <div key={h.hour} className="flex flex-col items-center gap-0.5" title={`${label}: ${h.pnl >= 0 ? "+" : ""}${h.pnl.toFixed(4)} (${h.count} Trades)`}>
+                  <div className="w-5 h-5 rounded-sm" style={{ background: col }} />
+                  <span className="text-[7px] text-[var(--text-quaternary)]">{label}</span>
                 </div>
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* Last optimization */}
-      {lastOpt && (
-        <div className="rounded-lg p-2.5" style={{ background: "var(--bg-secondary)" }}>
-          <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider mb-1 font-semibold">Letzte Optimierung</div>
-          <div className="text-[11px] text-[var(--text-secondary)]">{lastOpt.message}</div>
-          <div className="text-[9px] text-[var(--text-tertiary)] mt-0.5 font-mono">
-            {new Date(lastOpt.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
-          </div>
-        </div>
-      )}
-
-      {/* Regime history (last 3) */}
-      {optData.regimes.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          <span className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-semibold self-center">Regime-Verlauf:</span>
-          {optData.regimes.slice(0, 5).map((ev) => {
-            const d = ev.detail as Record<string, string> | null;
-            const newR = d?.new || "ranging";
-            const s = REGIME_STYLE[newR] || REGIME_STYLE.ranging;
-            return (
-              <span key={ev.id} className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold"
-                style={{ background: s.bg, color: s.color }}>
-                {d?.pair?.split("/")[0]} → {s.label}
-                <span className="ml-1 font-normal opacity-60">
-                  {new Date(ev.timestamp).toLocaleString("de-DE", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              </span>
-            );
-          })}
         </div>
       )}
     </div>
@@ -1056,6 +1200,7 @@ export default function Dashboard() {
   const [events, setEvents] = useState<BotEvent[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [optData, setOptData] = useState<{ optimizations: BotEvent[]; regimes: BotEvent[]; pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }> }>({ optimizations: [], regimes: [], pairRegimes: {} });
+  const [piStatus, setPiStatus] = useState<PiStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
   const [latestCommit, setLatestCommit] = useState<string | null>(null);
@@ -1065,7 +1210,7 @@ export default function Dashboard() {
   const demoTrades = useMemo(() => generateDemoTrades(), []);
 
   const refresh = useCallback(async () => {
-    const [s, t, e, c, ev, an, opt] = await Promise.all([
+    const [s, t, e, c, ev, an, opt, pi] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
       fetchJson<Trade[]>("/api/trades?limit=50"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
@@ -1073,6 +1218,7 @@ export default function Dashboard() {
       fetchJson<BotEvent[]>("/api/events?limit=30"),
       fetchJson<AnalyticsData>("/api/analytics"),
       fetchJson<typeof optData>("/api/optimization"),
+      fetchJson<PiStatus>("/api/pi"),
     ]);
 
     if (s?.dbConnected) {
@@ -1083,6 +1229,7 @@ export default function Dashboard() {
       setEvents(ev || []);
       if (an?.summary) setAnalytics(an);
       if (opt) setOptData(opt);
+      if (pi) setPiStatus(pi);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -1119,9 +1266,16 @@ export default function Dashboard() {
   const pairs = Object.entries(rawStatuses).filter(([k]) => k !== "__wallet__") as [string, PairMetrics][];
   const quoteCcy = status.pairs?.[0]?.split("/")?.[1] || "USDC";
   const totalPnl = pairs.reduce((s, [, m]) => s + (m.total_pnl || 0), 0);
-  const totalTrades = pairs.reduce((s, [, m]) => s + (m.trade_count || 0), 0);
   const walletTotal = walletData?._total_usdc ?? pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
-  const maxDd = Math.max(...pairs.map(([, m]) => m.max_drawdown_pct || 0), 0);
+
+  const allTrailingTp = pairs.flatMap(([, m]) => m.trailing_tp || []);
+
+  const targetRatio = useMemo(() => {
+    if (!pairs.length) return undefined;
+    const regimes = pairs.map(([, m]) => m.regime?.regime || "ranging");
+    const ratios = regimes.map(r => r === "trend_down" ? 0.7 : r === "trend_up" ? 0.3 : 0.5);
+    return ratios.reduce((s, v) => s + v, 0) / ratios.length;
+  }, [pairs]);
 
   const pnlData = useMemo(() => {
     if (isDemo) return demoPnl;
@@ -1139,9 +1293,7 @@ export default function Dashboard() {
   if (loading) {
     return (
       <div className="max-w-[1400px] mx-auto px-4 py-5 sm:px-6">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-          {[1,2,3,4].map(i => <Skeleton key={i} h={70} />)}
-        </div>
+        <Skeleton h={120} className="mb-4" />
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
           <Skeleton h={300} />
           <Skeleton h={300} />
@@ -1180,7 +1332,7 @@ export default function Dashboard() {
                 {critCount > 0 && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold"
                     style={{ background: "rgba(239,68,68,0.12)", color: "#ef4444" }}>
-                    ⚠ {critCount}
+                    {"\u26A0"} {critCount}
                   </span>
                 )}
                 {warnCount > 0 && critCount === 0 && (
@@ -1215,30 +1367,23 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Quick Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-        <MiniStat label="Gesamt-PnL" wert={`${totalPnl >= 0 ? "+" : ""}${fmt(totalPnl, 4)}`} farbe={totalPnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} />
-        <MiniStat label="Portfolio" wert={`${fmt(walletTotal)} ${quoteCcy}`} />
-        <MiniStat label="Trades" wert={totalTrades.toLocaleString("de-DE")} />
-        <MiniStat label="Drawdown" wert={`${fmt(maxDd)}%`} farbe={maxDd > 5 ? "text-[var(--down)]" : "text-[var(--warn)]"} />
-      </div>
+      {/* 1. Portfolio Hero + PnL + Regime */}
+      <PortfolioHero walletTotal={walletTotal} totalPnl={totalPnl} trades={trades} quoteCcy={quoteCcy} pairs={pairs} />
 
-      {/* Wallet */}
-      {walletData && <WalletUebersicht wallet={walletData} />}
+      {/* 2. Kapital-Verteilung with target ratio */}
+      {walletData && <WalletUebersicht wallet={walletData} targetRatio={targetRatio} />}
 
-      {/* Bot Intelligence */}
-      {!isDemo && pairs.length > 0 && (
-        <BotIntelligenzPanel pairs={pairs} optData={optData} />
-      )}
-
-      {/* Pair Sections */}
+      {/* 3. Per-Pair: Price Chart + Grid Viz + Info */}
       {pairs.length > 0 ? pairs.map(([p, m]) => (
-        <div key={p} className="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-3">
-          <div className="lg:col-span-3">
+        <div key={p} className="grid grid-cols-1 lg:grid-cols-12 gap-3 mb-3">
+          <div className="lg:col-span-5">
             <PreisChart pair={p} orders={m.open_orders} quote={quoteCcy} />
           </div>
-          <div className="lg:col-span-2">
-            <PairKarte pair={p} m={m} quote={quoteCcy} />
+          <div className="lg:col-span-4">
+            <GridVisualisierung m={m} />
+          </div>
+          <div className="lg:col-span-3">
+            <PairInfoCard pair={p} m={m} quote={quoteCcy} />
           </div>
         </div>
       )) : (
@@ -1248,7 +1393,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Charts Row */}
+      {/* 4. Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
         <EquityChart data={equity} quote={quoteCcy} />
         {pnlData.length > 0
@@ -1257,16 +1402,22 @@ export default function Dashboard() {
         }
       </div>
 
-      {/* Analytics */}
-      {!isDemo && analytics && <AnalyticsPanel data={analytics} />}
+      {/* 5. Trades with Trailing-TP + Self-Optimization */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+        <TradesTabelle trades={trades} trailingTp={allTrailingTp.length > 0 ? allTrailingTp : undefined} quote={quoteCcy} />
+        {!isDemo && pairs.length > 0 && (
+          <SelbstOptimierungPanel optData={optData} pairs={pairs} />
+        )}
+      </div>
 
-      {/* Trades + Activity + Controls */}
+      {/* 6. Analytics */}
+      {!isDemo && analytics && <div className="mb-3"><AnalyticsPanel data={analytics} /></div>}
+
+      {/* 7. Bot Health + Activity + Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <div className="lg:col-span-2"><TradesTabelle trades={trades} quote={quoteCcy} /></div>
-        <div className="flex flex-col gap-3">
-          <Steuerung status={status.status} commands={commands} onCommand={handleCommand} />
-          {!isDemo && events.length > 0 && <AktivitaetsFeed events={events} />}
-        </div>
+        <BotGesundheit pi={piStatus} status={status} />
+        <Steuerung status={status.status} commands={commands} onCommand={handleCommand} />
+        {!isDemo && events.length > 0 && <AktivitaetsFeed events={events} />}
       </div>
     </div>
   );

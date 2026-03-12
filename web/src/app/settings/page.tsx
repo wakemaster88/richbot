@@ -1167,88 +1167,70 @@ export default function SettingsPage() {
           />
         </Sektion>
 
-        {/* Grid */}
-        <Sektion titel="Grid-Einstellungen" beschreibung="Grid-Level und Ordergroesse werden automatisch vom CapitalAllocator berechnet">
-          <div className="rounded-xl p-3.5 mb-3 border border-[var(--border-subtle)]" style={{ background: "var(--accent-bg)" }}>
+        {/* Risiko-Level */}
+        <div className="card card-hover p-5 sm:p-6 transition-all">
+          <div className="mb-5">
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-0.5">Risiko-Level</h3>
+            <p className="text-[11px] text-[var(--text-tertiary)]">
+              Bestimmt Reserve-Anteil und Drawdown-Limit — Grid, Ordergroesse und Spacing berechnet der Bot automatisch
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {([
+              { key: "konservativ", label: "Konservativ", icon: "\u{1F6E1}\uFE0F", reserve: 25, dd: 3, kf: 0.15, desc: "Groessere Reserve, engere Drawdown-Grenze. Weniger Gewinn, aber sicherer." },
+              { key: "ausgewogen", label: "Ausgewogen", icon: "\u2696\uFE0F", reserve: 15, dd: 5, kf: 0.25, desc: "Gutes Gleichgewicht zwischen Sicherheit und Rendite. Empfohlen." },
+              { key: "aggressiv", label: "Aggressiv", icon: "\u{1F680}", reserve: 10, dd: 8, kf: 0.35, desc: "Maximales Kapital im Einsatz, hoehere Toleranz. Mehr Risiko, mehr Chance." },
+            ] as const).map((opt) => {
+              const current = config.risk?.max_drawdown_percent;
+              const isActive = current === opt.dd || (!current && opt.key === "ausgewogen");
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => {
+                    update("risk.max_drawdown_percent", opt.dd);
+                    update("risk.max_position_percent", 100 - opt.reserve);
+                    update("risk.kelly_fraction", opt.kf);
+                  }}
+                  className="relative text-left p-4 rounded-xl border-2 transition-all"
+                  style={{
+                    borderColor: isActive ? "var(--accent)" : "var(--border)",
+                    background: isActive ? "var(--accent-bg)" : "var(--bg-secondary)",
+                  }}
+                >
+                  {isActive && (
+                    <span className="absolute top-2 right-2 w-5 h-5 rounded-full bg-[var(--accent)] flex items-center justify-center text-[10px] text-white font-bold">{"\u2713"}</span>
+                  )}
+                  <div className="text-xl mb-2">{opt.icon}</div>
+                  <div className="text-sm font-bold text-[var(--text-primary)] mb-1">{opt.label}</div>
+                  <p className="text-[10px] text-[var(--text-tertiary)] leading-relaxed mb-3">{opt.desc}</p>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="px-2 py-1.5 rounded-lg" style={{ background: "var(--bg-primary)" }}>
+                      <span className="text-[var(--text-quaternary)]">Reserve</span>
+                      <span className="font-mono font-bold text-[var(--text-primary)] ml-1">{opt.reserve}%</span>
+                    </div>
+                    <div className="px-2 py-1.5 rounded-lg" style={{ background: "var(--bg-primary)" }}>
+                      <span className="text-[var(--text-quaternary)]">Max DD</span>
+                      <span className="font-mono font-bold text-[var(--text-primary)] ml-1">{opt.dd}%</span>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-4 rounded-xl p-3.5 border border-[var(--border-subtle)]" style={{ background: "var(--bg-secondary)" }}>
             <div className="flex items-center gap-2 mb-1">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 2a7 7 0 017 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 01-2 2h-4a2 2 0 01-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 017-7z"/>
                 <path d="M10 21h4"/>
               </svg>
-              <span className="text-[11px] font-semibold" style={{ color: "var(--accent)" }}>Autonomer CapitalAllocator aktiv</span>
+              <span className="text-[11px] font-semibold" style={{ color: "var(--accent)" }}>Autonomer Bot</span>
             </div>
             <p className="text-[10px] text-[var(--text-tertiary)]">
-              Grid-Level, Buy/Sell-Aufteilung und Ordergroesse werden automatisch alle 5 Min an dein Kapital angepasst.
-              Bei starkem Ungleichgewicht wird automatisch rebalanced.
+              Grid-Level, Spacing, Buy/Sell-Aufteilung und Ordergroesse werden alle 5 Min automatisch berechnet.
+              Regime-Erkennung, Trailing-TP und Selbst-Optimierung arbeiten autonom.
             </p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Zahl label="Abstand %" value={config.grid?.spacing_percent} onChange={(v) => update("grid.spacing_percent", v)} step={0.1} min={0.1} max={5} hint="Prozent-Abstand zwischen den Leveln" />
-            <Zahl label="Range-Multiplikator" value={config.grid?.range_multiplier} onChange={(v) => update("grid.range_multiplier", v)} step={0.1} min={0.5} max={5} />
-            <Zahl label="Trail-Schwelle %" value={config.grid?.trail_trigger_percent} onChange={(v) => update("grid.trail_trigger_percent", v)} step={0.1} min={0.5} max={10} hint="Ausbruch-Schwelle fur Grid-Verschiebung" />
-          </div>
-          <Schalter label="Infinity-Modus" value={config.grid?.infinity_mode} onChange={(v) => update("grid.infinity_mode", v)} hint="Grid verschiebt sich bei Ausbruch statt zu stoppen" />
-        </Sektion>
-
-        {/* ATR */}
-        <Sektion titel="ATR-Range" beschreibung="Average True Range berechnet die Grid-Grenzen">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Zahl label="Periode" value={config.atr?.period} onChange={(v) => update("atr.period", v)} min={5} max={50} />
-            <Auswahl label="Zeitrahmen" value={config.atr?.timeframe} options={["5m", "15m", "30m", "1h", "4h", "1d"]} onChange={(v) => update("atr.timeframe", v)} />
-            <Zahl label="Multiplikator" value={config.atr?.multiplier} onChange={(v) => update("atr.multiplier", v)} step={0.1} min={0.5} max={5} />
-          </div>
-        </Sektion>
-
-        {/* Risiko */}
-        <Sektion titel="Risikomanagement" beschreibung="Positionsgrosse, Drawdown-Limits und Trailing Stops">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Zahl label="Kelly-Faktor" value={config.risk?.kelly_fraction} onChange={(v) => update("risk.kelly_fraction", v)} step={0.05} min={0.05} max={1} hint="0.25 = Viertel-Kelly (konservativ)" />
-            <Zahl label="Max. Drawdown %" value={config.risk?.max_drawdown_percent} onChange={(v) => update("risk.max_drawdown_percent", v)} step={0.5} min={1} max={50} hint="Bot pausiert bei diesem Drawdown" />
-            <Zahl label="Trailing Stop %" value={config.risk?.trailing_stop_percent} onChange={(v) => update("risk.trailing_stop_percent", v)} step={0.1} min={0.1} max={10} />
-            <Zahl label="Max. Position %" value={config.risk?.max_position_percent} onChange={(v) => update("risk.max_position_percent", v)} step={1} min={5} max={100} hint="Maximaler %-Anteil des Kapitals" />
-            <Zahl label="Min. Orderbetrag" value={config.risk?.min_order_amount} onChange={(v) => update("risk.min_order_amount", v)} step={0.0001} min={0.0001} />
-          </div>
-          <Schalter label="Volatilitats-Skalierung" value={config.risk?.volatility_scaling} onChange={(v) => update("risk.volatility_scaling", v)} hint="Ordergrosse passt sich an Volatilitat an" />
-        </Sektion>
-
-        {/* ML */}
-        <Sektion titel="LSTM-Vorhersage" beschreibung="Neuronales Netz fur Range-Prognosen">
-          <Schalter label="ML aktiviert" value={config.ml?.enabled} onChange={(v) => update("ml.enabled", v)} />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Zahl label="Konfidenz-Schwelle" value={config.ml?.confidence_threshold} onChange={(v) => update("ml.confidence_threshold", v)} step={0.05} min={0.5} max={0.99} hint="Mindest-Konfidenz fur Aktionen" />
-            <Zahl label="Vorhersage-Intervall (Min.)" value={config.ml?.prediction_interval_minutes} onChange={(v) => update("ml.prediction_interval_minutes", v)} min={5} max={120} />
-            <Zahl label="Neutraining-Intervall (Std.)" value={config.ml?.retrain_interval_hours} onChange={(v) => update("ml.retrain_interval_hours", v)} min={1} max={168} />
-            <Zahl label="Lookback (Tage)" value={config.ml?.lookback_days} onChange={(v) => update("ml.lookback_days", v)} min={14} max={365} />
-          </div>
-          <Tags
-            label="Zeitrahmen"
-            value={config.ml?.timeframes}
-            onChange={(v) => update("ml.timeframes", v.map((t) => t.toLowerCase()))}
-            hint="z.B. 1h, 4h"
-            placeholder="1h"
-          />
-        </Sektion>
-
-        {/* WebSocket */}
-        <Sektion titel="WebSocket" beschreibung="Echtzeit-Verbindung zur Borse">
-          <Schalter label="WebSocket aktiviert" value={config.websocket?.enabled} onChange={(v) => update("websocket.enabled", v)} />
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Zahl label="Reconnect-Verzog. (Sek.)" value={config.websocket?.reconnect_delay} onChange={(v) => update("websocket.reconnect_delay", v)} min={1} max={30} />
-            <Zahl label="Max. Reconnect-Versuche" value={config.websocket?.max_reconnect_attempts} onChange={(v) => update("websocket.max_reconnect_attempts", v)} min={5} max={200} />
-            <Zahl label="Ping-Intervall (Sek.)" value={config.websocket?.ping_interval} onChange={(v) => update("websocket.ping_interval", v)} min={10} max={120} />
-          </div>
-        </Sektion>
-
-        {/* Cloud */}
-        <Sektion titel="Cloud-Synchronisation" beschreibung="Verbindung zwischen Pi und Vercel Dashboard">
-          <Schalter label="Cloud-Sync aktiviert" value={config.cloud?.enabled} onChange={(v) => update("cloud.enabled", v)} />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Zahl label="Heartbeat-Intervall (Sek.)" value={config.cloud?.heartbeat_interval} onChange={(v) => update("cloud.heartbeat_interval", v)} min={10} max={120} hint="Wie oft der Pi ein Lebenszeichen sendet" />
-            <Zahl label="Befehl-Abruf (Sek.)" value={config.cloud?.command_poll_interval} onChange={(v) => update("cloud.command_poll_interval", v)} min={2} max={30} hint="Wie oft der Pi auf neue Befehle pruft" />
-          </div>
-          <Schalter label="Trades synchronisieren" value={config.cloud?.sync_trades} onChange={(v) => update("cloud.sync_trades", v)} />
-          <Schalter label="Kapital synchronisieren" value={config.cloud?.sync_equity} onChange={(v) => update("cloud.sync_equity", v)} />
-        </Sektion>
+        </div>
       </div>
     </div>
   );
