@@ -337,9 +337,16 @@ class GridEngine:
             return max(unfilled, key=lambda l: l.price)
         return None
 
-    def get_levels_to_place(self) -> list[GridLevel]:
-        """Get all levels that need order placement."""
-        return [l for l in self.state.levels if not l.filled and l.order_id is None]
+    def get_levels_to_place(self, sides_allowed: set[str] | None = None) -> list[GridLevel]:
+        """Get all levels that need order placement.
+
+        Args:
+            sides_allowed: If given, only return levels whose side is in this set.
+        """
+        out = [l for l in self.state.levels if not l.filled and l.order_id is None]
+        if sides_allowed is not None:
+            out = [l for l in out if l.side in sides_allowed]
+        return out
 
     def reset(self):
         self.state = GridState(

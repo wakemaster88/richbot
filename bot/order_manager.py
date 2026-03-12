@@ -47,6 +47,7 @@ class OrderManager:
         self._consecutive_fails: int = 0
         self._paused_levels: set[str] = set()  # level_ids paused due to balance issues
         self._pause_until: float = 0  # timestamp until retries are suppressed
+        self._last_filter_log: tuple[bool, bool] = (True, True)  # track to log once on change
 
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
@@ -85,17 +86,33 @@ class OrderManager:
         allow_buys = (entry_filter or {}).get("allow_buys", True)
         allow_sells = (entry_filter or {}).get("allow_sells", True)
 
-        levels = self.grid.get_levels_to_place()
+        if (allow_buys, allow_sells) != self._last_filter_log:
+            blocked = []
+            if not allow_buys:
+                blocked.append("Buys")
+            if not allow_sells:
+                blocked.append("Sells")
+            if blocked:
+                logger.info("Entry-Filter: %s blockiert (Regime/RSI)", " + ".join(blocked))
+            else:
+                logger.info("Entry-Filter: alle Seiten wieder erlaubt")
+            self._last_filter_log = (allow_buys, allow_sells)
+
+        sides_allowed: set[str] | None = None
+        if not allow_buys or not allow_sells:
+            sides_allowed = set()
+            if allow_buys:
+                sides_allowed.add("buy")
+            if allow_sells:
+                sides_allowed.add("sell")
+
+        levels = self.grid.get_levels_to_place(sides_allowed=sides_allowed)
         placed = []
         self.last_fail_reason = ""
         failures_this_round = 0
 
         for level in levels:
             if level.level_id in self._paused_levels:
-                continue
-            if level.side == "buy" and not allow_buys:
-                continue
-            if level.side == "sell" and not allow_sells:
                 continue
             try:
                 if level.side == "buy":
