@@ -720,252 +720,7 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
   );
 }
 
-/* ---- Smart Grid ---- */
-
-interface SmartGridResult {
-  gridCount: number;
-  amountPerOrder: number;
-  rangeMultiplier: number;
-  maxDrawdown: number;
-  trailingStop: number;
-  maxPosition: number;
-}
-
-function stepForPrice(price: number): number {
-  if (price > 10000) return 0.00001;
-  if (price > 100) return 0.001;
-  return 0.01;
-}
-
-function ceilStep(value: number, step: number): number {
-  return Math.ceil(value / step) * step;
-}
-
-function scoreGridConfig(
-  n: number, half: number, price: number, minAmount: number, step: number,
-): { score: number; amount: number } {
-  const ROUNDTRIP_FEE = 0.002;
-  const DAILY_VOL = 0.025;
-  const R = DAILY_VOL * 1.2;
-
-  const perSide = n / 2;
-  let amount = ceilStep(half / (perSide * price), step);
-  if (amount * price * perSide > half * 1.05) amount = minAmount;
-  if (amount < minAmount) return { score: -1, amount: minAmount };
-  if (amount * price * perSide > half * 1.05) return { score: -1, amount: minAmount };
-
-  const orderVal = amount * price;
-  const positions: number[] = [];
-  for (let i = 0; i < perSide; i++) positions.push(((i + 1) / perSide) ** 0.6);
-
-  let daily = 0;
-  for (let i = 0; i < perSide; i++) {
-    const dist = R * positions[i];
-    const spacing = i === 0 ? dist : R * (positions[i] - positions[i - 1]);
-    if (spacing <= ROUNDTRIP_FEE) continue;
-    const profitPerRT = (spacing - ROUNDTRIP_FEE) * orderVal;
-    const rtPerDay = Math.min(3.0, DAILY_VOL / (2 * dist) * 0.5);
-    daily += profitPerRT * rtPerDay;
-  }
-  return { score: daily, amount };
-}
-
-function calcSmartGrid(equity: number, price: number, pairCount: number = 1): SmartGridResult {
-  const MIN_NOTIONAL = 5.0;
-  const step = stepForPrice(price);
-  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, step);
-
-  const eqPerPair = equity / Math.max(1, pairCount);
-  const half = eqPerPair * 0.80 / 2;
-  const maxPerSide = Math.floor(half / (minAmount * price));
-  const maxN = Math.min(Math.max(maxPerSide * 2, 4), 12);
-
-  let bestN = 4;
-  let bestAmount = minAmount;
-  let bestScore = -1;
-
-  for (let n = 4; n <= maxN; n += 2) {
-    const { score, amount } = scoreGridConfig(n, half, price, minAmount, step);
-    if (score > bestScore) {
-      bestScore = score;
-      bestN = n;
-      bestAmount = amount;
-    }
-  }
-
-  const rangeMultiplier = bestN <= 6 ? 1.2 : bestN <= 10 ? 1.0 : 0.8;
-  const maxDrawdown = equity < 100 ? 25 : equity < 500 ? 20 : 15;
-  const trailingStop = equity < 100 ? 5 : equity < 500 ? 4 : 3;
-  const maxPosition = equity < 200 ? 70 : 50;
-
-  return { gridCount: bestN, amountPerOrder: bestAmount, rangeMultiplier, maxDrawdown, trailingStop, maxPosition };
-}
-
-function calcMaxAffordable(equity: number, price: number, pairCount: number = 1): number {
-  const MIN_NOTIONAL = 5.0;
-  const eqPerPair = equity / Math.max(1, pairCount);
-  const half = eqPerPair * 0.80 / 2;
-  const step = stepForPrice(price);
-  const minAmount = ceilStep((MIN_NOTIONAL * 1.15) / price, step);
-  const costPerSide = minAmount * price;
-  const maxPerSide = Math.floor(half / costPerSide);
-  return Math.max(2, maxPerSide * 2);
-}
-
-function SmartGridPanel({ gridCount, amountPerOrder, pairs, onApply }: {
-  gridCount: number; amountPerOrder: number; pairs: string[];
-  onApply: (result: SmartGridResult) => void;
-}) {
-  const [price, setPrice] = useState<number | null>(null);
-  const [equity, setEquity] = useState<number | null>(null);
-
-  const firstPair = pairs[0] || "BTC/USDC";
-  const base = firstPair.split("/")[0] || "BTC";
-  const symbol = firstPair.replace("/", "");
-
-  useEffect(() => {
-    fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`)
-      .then((r) => r.json())
-      .then((d) => setPrice(parseFloat(d.price)))
-      .catch(() => {});
-    fetch("/api/status", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d?.dbConnected && d?.pairStatuses) {
-          let totalEq = 0;
-          for (const ps of Object.values(d.pairStatuses) as { current_equity?: number }[]) {
-            totalEq += ps.current_equity || 0;
-          }
-          if (totalEq > 0) setEquity(totalEq);
-        }
-      })
-      .catch(() => {});
-  }, [symbol]);
-
-  if (!price) return null;
-
-  const pairCount = pairs.length || 1;
-  const stufen = [4, 6, 8, 10, 12, 16, 20];
-  const fmt = (n: number) => n.toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-  const maxAffordable = equity ? calcMaxAffordable(equity, price, pairCount) : null;
-  const smart = equity ? calcSmartGrid(equity, price, pairCount) : null;
-
-  const step = stepForPrice(price);
-  const minAmt = ceilStep((5.0 * 1.15) / price, step);
-  const eqPerPair = (equity || 0) / pairCount;
-  const half = eqPerPair * 0.80 / 2;
-
-  const handleApplySmart = () => {
-    if (!smart) return;
-    onApply(smart);
-  };
-
-  const handleSelectLevel = (n: number) => {
-    if (!equity || !price) return;
-    const { amount } = scoreGridConfig(n, half, price, minAmt, step);
-    const rangeMultiplier = n <= 6 ? 1.2 : n <= 10 ? 1.0 : 0.8;
-    const maxDrawdown = equity < 100 ? 25 : equity < 500 ? 20 : 15;
-    const trailingStop = equity < 100 ? 5 : equity < 500 ? 4 : 3;
-    const maxPosition = equity < 200 ? 70 : 50;
-    onApply({ gridCount: n, amountPerOrder: Math.max(minAmt, amount), rangeMultiplier, maxDrawdown, trailingStop, maxPosition });
-  };
-
-  return (
-    <div className="mt-4 rounded-xl p-3.5 border border-[var(--border-subtle)]" style={{ background: "var(--bg-secondary)" }}>
-      {/* Header + Smart Button */}
-      <div className="flex items-center justify-between mb-2.5">
-        <div className="flex items-center gap-2">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />
-          </svg>
-          <span className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-[0.1em] font-semibold">Kapital pro Grid-Level</span>
-        </div>
-        {smart && (
-          <button onClick={handleApplySmart}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all active:scale-95"
-            style={{ background: "var(--accent-bg)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 20%, transparent)" }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2a7 7 0 017 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 01-2 2h-4a2 2 0 01-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 017-7z"/>
-              <path d="M10 21h4"/>
-            </svg>
-            Smart Grid
-          </button>
-        )}
-      </div>
-
-      {/* Status */}
-      {equity !== null && maxAffordable !== null && (
-        <div className="mb-3 px-3 py-2 rounded-lg text-[11px] font-medium" style={{
-          background: (maxAffordable >= gridCount) ? "var(--up-bg)" : "var(--warn-bg)",
-          color: (maxAffordable >= gridCount) ? "var(--up)" : "var(--warn)",
-        }}>
-          {(maxAffordable >= gridCount)
-            ? `Dein Kapital (${fmt(equity)} USDC) reicht fuer ${gridCount} Level`
-            : `Dein Kapital (${fmt(equity)} USDC) reicht fuer max. ${Math.max(2, maxAffordable)} Level — ${gridCount} konfiguriert`
-          }
-        </div>
-      )}
-
-      {/* Smart Preview */}
-      {smart && equity && (
-        <div className="mb-3 px-3 py-2 rounded-lg text-[11px] border" style={{
-          background: "var(--accent-bg)", color: "var(--accent)",
-          borderColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
-        }}>
-          {(() => {
-            const { score } = scoreGridConfig(smart.gridCount, half, price, minAmt, step);
-            const pct = eqPerPair > 0 && score > 0 ? (score / eqPerPair * 100).toFixed(2) : "?";
-            return <>Rendite-Optimum: <strong>{smart.gridCount} Level</strong> (~{pct}%/Tag), {parseFloat(smart.amountPerOrder.toPrecision(6))} {base}/Order, Range ×{smart.rangeMultiplier}</>;
-          })()}
-        </div>
-      )}
-
-      {/* Level Grid */}
-      <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
-        {stufen.map((n) => {
-          const needed = Math.ceil(n * minAmt * price / 0.80) * pairCount;
-          const affordable = maxAffordable !== null && n <= maxAffordable;
-          const isCurrent = n === gridCount;
-          const isSmart = smart !== null && n === smart.gridCount && n !== gridCount;
-          const { score } = equity ? scoreGridConfig(n, half, price, minAmt, step) : { score: 0 };
-          const dailyPct = eqPerPair > 0 && score > 0 ? (score / eqPerPair * 100) : 0;
-          return (
-            <button key={n} onClick={() => affordable && handleSelectLevel(n)} disabled={!affordable}
-              className="text-center rounded-lg px-1.5 py-2 transition-all disabled:cursor-not-allowed hover:enabled:scale-105 active:enabled:scale-95"
-              style={{
-                background: isCurrent ? "var(--accent-bg)" : isSmart ? "color-mix(in srgb, var(--up) 8%, transparent)" : "var(--bg-primary)",
-                border: `1.5px solid ${isCurrent ? "var(--accent)" : isSmart ? "var(--up)" : "var(--border-subtle)"}`,
-                opacity: !affordable ? 0.35 : 1,
-              }}>
-              <p className="text-[11px] font-bold font-mono" style={{ color: isCurrent ? "var(--accent)" : isSmart ? "var(--up)" : "var(--text-primary)" }}>{n}</p>
-              <p className="text-[8px] text-[var(--text-quaternary)]">Level</p>
-              {affordable && dailyPct > 0 ? (
-                <>
-                  <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: "var(--up)" }}>
-                    ~{dailyPct.toFixed(2)}%
-                  </p>
-                  <p className="text-[7px] text-[var(--text-quaternary)]">pro Tag</p>
-                </>
-              ) : (
-                <>
-                  <p className="text-[10px] font-mono font-semibold mt-0.5" style={{ color: "var(--down)" }}>
-                    {fmt(needed)}
-                  </p>
-                  <p className="text-[7px] text-[var(--text-quaternary)]">USDC</p>
-                </>
-              )}
-              {isSmart && <p className="text-[7px] font-bold mt-0.5" style={{ color: "var(--up)" }}>BEST</p>}
-            </button>
-          );
-        })}
-      </div>
-
-      <p className="text-[9px] text-[var(--text-quaternary)] mt-2.5">
-        Klicke auf ein Level um es zu uebernehmen. Smart Grid optimiert alle Einstellungen fuer {firstPair} automatisch.
-      </p>
-    </div>
-  );
-}
+/* SmartGrid functions removed — CapitalAllocator on Pi handles grid sizing autonomously */
 
 /* ---- Install Guide ---- */
 
@@ -1413,28 +1168,26 @@ export default function SettingsPage() {
         </Sektion>
 
         {/* Grid */}
-        <Sektion titel="Grid-Einstellungen" beschreibung="Parameter fur das Grid-Trading">
+        <Sektion titel="Grid-Einstellungen" beschreibung="Grid-Level und Ordergroesse werden automatisch vom CapitalAllocator berechnet">
+          <div className="rounded-xl p-3.5 mb-3 border border-[var(--border-subtle)]" style={{ background: "var(--accent-bg)" }}>
+            <div className="flex items-center gap-2 mb-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2a7 7 0 017 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 01-2 2h-4a2 2 0 01-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 017-7z"/>
+                <path d="M10 21h4"/>
+              </svg>
+              <span className="text-[11px] font-semibold" style={{ color: "var(--accent)" }}>Autonomer CapitalAllocator aktiv</span>
+            </div>
+            <p className="text-[10px] text-[var(--text-tertiary)]">
+              Grid-Level, Buy/Sell-Aufteilung und Ordergroesse werden automatisch alle 5 Min an dein Kapital angepasst.
+              Bei starkem Ungleichgewicht wird automatisch rebalanced.
+            </p>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Zahl label="Anzahl Grid-Level" value={config.grid?.grid_count} onChange={(v) => update("grid.grid_count", v)} min={4} max={100} hint="Mehr Level = engeres Grid, mehr Trades" />
             <Zahl label="Abstand %" value={config.grid?.spacing_percent} onChange={(v) => update("grid.spacing_percent", v)} step={0.1} min={0.1} max={5} hint="Prozent-Abstand zwischen den Leveln" />
-            <Zahl label={`Betrag pro Order (${(config.pairs?.[0] || "BTC/USDC").split("/")[0]})`} value={config.grid?.amount_per_order} onChange={(v) => update("grid.amount_per_order", v)} step={0.0001} min={0.0001} hint="Muss ueber Binance Mindest-Orderwert liegen." />
             <Zahl label="Range-Multiplikator" value={config.grid?.range_multiplier} onChange={(v) => update("grid.range_multiplier", v)} step={0.1} min={0.5} max={5} />
             <Zahl label="Trail-Schwelle %" value={config.grid?.trail_trigger_percent} onChange={(v) => update("grid.trail_trigger_percent", v)} step={0.1} min={0.5} max={10} hint="Ausbruch-Schwelle fur Grid-Verschiebung" />
           </div>
           <Schalter label="Infinity-Modus" value={config.grid?.infinity_mode} onChange={(v) => update("grid.infinity_mode", v)} hint="Grid verschiebt sich bei Ausbruch statt zu stoppen" />
-          <SmartGridPanel
-            gridCount={config.grid?.grid_count || 4}
-            amountPerOrder={config.grid?.amount_per_order || 0.0001}
-            pairs={config.pairs || ["BTC/USDC"]}
-            onApply={(r) => {
-              update("grid.grid_count", r.gridCount);
-              update("grid.amount_per_order", r.amountPerOrder);
-              update("grid.range_multiplier", r.rangeMultiplier);
-              update("risk.max_drawdown_percent", r.maxDrawdown);
-              update("risk.trailing_stop_percent", r.trailingStop);
-              update("risk.max_position_percent", r.maxPosition);
-            }}
-          />
         </Sektion>
 
         {/* ATR */}

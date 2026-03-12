@@ -177,6 +177,29 @@ class Exchange:
         return {"id": str(data["orderId"]), "symbol": symbol, "side": side.lower(),
                 "price": float(data["price"]), "amount": float(data["origQty"]), "status": data["status"].lower()}
 
+    def create_market_order_http(self, symbol: str, side: str, amount: float) -> dict:
+        binance_sym = symbol.replace("/", "")
+        qty_str = self.amount_to_precision(symbol, amount)
+        data = self._signed_request("POST", "/api/v3/order", {
+            "symbol": binance_sym,
+            "side": side.upper(),
+            "type": "MARKET",
+            "quantity": qty_str,
+        })
+        fills = data.get("fills", [])
+        avg_price = float(data.get("price", 0))
+        if fills:
+            total_qty = sum(float(f["qty"]) for f in fills)
+            total_cost = sum(float(f["qty"]) * float(f["price"]) for f in fills)
+            avg_price = total_cost / total_qty if total_qty > 0 else avg_price
+        return {"id": str(data["orderId"]), "symbol": symbol, "side": side.lower(),
+                "price": avg_price, "amount": float(data["executedQty"]),
+                "status": data["status"].lower()}
+
+    async def async_create_market_order(self, symbol: str, side: str, amount: float) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.create_market_order_http, symbol, side, amount)
+
     def cancel_order_http(self, order_id: str, symbol: str) -> dict:
         binance_sym = symbol.replace("/", "")
         return self._signed_request("DELETE", "/api/v3/order", {"symbol": binance_sym, "orderId": order_id})

@@ -16,8 +16,10 @@ interface BotStatus {
 interface OpenOrder { side: string; price: number; amount: number; id: string; }
 interface PairMetrics {
   pair: string; price: number; range: string; range_source: string;
-  grid_levels: number; grid_configured?: number; active_orders: number; filled_orders: number;
+  grid_levels: number; grid_configured?: number; grid_buy_count?: number; grid_sell_count?: number;
+  active_orders: number; filled_orders: number;
   unplaced_orders?: number; grid_issue?: string;
+  allocation?: { equity: number; reserve: number; amount_per_order: number; rebalance_needed: boolean };
   total_pnl: number; realized_pnl: number; unrealized_pnl: number;
   trade_count: number; max_drawdown_pct: number; sharpe_ratio: number;
   current_equity: number; buy_count?: number; sell_count?: number;
@@ -285,7 +287,7 @@ function PairKarte({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; 
 
       {/* Stats Grid */}
       <div className="grid grid-cols-3 gap-2 mb-3">
-        <MiniStat label="Grid" wert={`${m.active_orders}/${m.grid_configured || m.grid_levels}`}
+        <MiniStat label="Grid" wert={`${m.active_orders}/${m.grid_configured || m.grid_levels}${m.grid_buy_count != null ? ` (${m.grid_buy_count}B/${m.grid_sell_count}S)` : ""}`}
           farbe={m.active_orders < (m.grid_configured || m.grid_levels) ? "text-[var(--warn)]" : undefined} />
         <MiniStat label="Trades" wert={`${m.trade_count}`} />
         <MiniStat label="Drawdown" wert={`${fmt(m.max_drawdown_pct)}%`} farbe="text-[var(--warn)]" />

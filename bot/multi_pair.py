@@ -13,6 +13,7 @@ import time
 
 import pandas as pd
 
+from bot.capital_allocator import CapitalAllocator, AllocationResult
 from bot.cloud_sync import CloudSync
 from bot.config import BotConfig
 from bot.dynamic_range import compute_dynamic_range, detect_range_breakout, shift_range, RangeResult
@@ -48,13 +49,16 @@ class PairBot:
         self.ml = ml_predictor
         self.cloud = cloud
 
-        self.pair_grid_count = config.grid.grid_count
-        self.pair_amount = config.grid.amount_per_order
+        self.pair_grid_count = 4  # will be set by CapitalAllocator
+        self.pair_amount = 0.0
+        self.pair_buy_count = 2
+        self.pair_sell_count = 2
+        self.last_allocation: AllocationResult | None = None
 
         self.grid = GridEngine(
             grid_count=self.pair_grid_count,
             spacing_percent=config.grid.spacing_percent,
-            amount_per_order=self.pair_amount,
+            amount_per_order=config.grid.amount_per_order,
             infinity_mode=config.grid.infinity_mode,
             trail_trigger_percent=config.grid.trail_trigger_percent,
         )
@@ -105,8 +109,25 @@ class PairBot:
                  "win": managed_order.pnl > 0},
             ))
 
-    async def initialize(self):
-        """Set up initial grid."""
+    def apply_allocation(self, alloc: AllocationResult):
+        """Apply an AllocationResult to this pair bot's grid config."""
+        self.last_allocation = alloc
+        self.pair_grid_count = alloc.grid_count
+        self.pair_buy_count = alloc.buy_count
+        self.pair_sell_count = alloc.sell_count
+        self.pair_amount = alloc.amount_per_order
+
+        self.grid = GridEngine(
+            grid_count=alloc.grid_count,
+            spacing_percent=self.config.grid.spacing_percent,
+            amount_per_order=alloc.amount_per_order,
+            infinity_mode=self.config.grid.infinity_mode,
+            trail_trigger_percent=self.config.grid.trail_trigger_percent,
+        )
+        self.order_mgr.grid = self.grid
+
+    async def initialize(self, allocator: CapitalAllocator, pair_count: int):
+        """Set up initial grid using CapitalAllocator."""
         logger.info("Initializing pair bot for %s", self.pair)
 
         try:
@@ -134,84 +155,25 @@ class PairBot:
             self.ml, self.config.ml,
         )
 
-        min_fee_spacing = self.current_price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
-        levels_per_side = max(self.pair_grid_count // 2, 1)
-        min_half_range = levels_per_side * min_fee_spacing * 1.15
-        if self.current_range.spread < min_half_range * 2:
-            old_spread = self.current_range.spread
-            new_half = min_half_range
-            self.current_range = RangeResult(
-                upper=self.current_price + new_half,
-                lower=self.current_price - new_half,
-                mid=self.current_price,
-                atr=self.current_range.atr,
-                source=self.current_range.source,
-                confidence=self.current_range.confidence,
-            )
-            logger.info(
-                "%s Range geweitet: %.2f → %.2f (min. fuer %d Level mit Fee-Spacing %.2f)",
-                self.pair, old_spread, self.current_range.spread,
-                self.pair_grid_count, min_fee_spacing,
-            )
-
-        vol = self.risk.calculate_volatility(df["close"].values)
         balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
-
-        quote_bal = balance.get(self.quote, {})
-        base = self.pair.split("/")[0]
-        base_bal = balance.get(base, {})
-        logger.info(
-            "%s Balance — %s: free=%.4f, locked=%.4f, total=%.4f | %s: free=%.8f, locked=%.8f, total=%.8f",
-            self.pair,
-            self.quote, quote_bal.get("free", 0), quote_bal.get("used", 0), quote_bal.get("total", 0),
-            base, base_bal.get("free", 0), base_bal.get("used", 0), base_bal.get("total", 0),
-        )
-
-        usdt_balance = quote_bal.get("free", 0)
-        base_free = base_bal.get("free", 0)
-        dynamic_amount = self.risk.calculate_position_size(usdt_balance, self.current_price, vol)
-
         market = self.exchange._markets.get(self.pair, {})
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
         step_size = market.get("precision", {}).get("amount", 0.00001)
-        min_amount_for_notional = (min_notional * 1.15) / self.current_price
-        import math
-        min_amount_for_notional = math.ceil(min_amount_for_notional / step_size) * step_size
 
-        dynamic_amount = math.floor(dynamic_amount / step_size) * step_size
-
-        if dynamic_amount * self.current_price < min_notional * 1.1:
-            dynamic_amount = min_amount_for_notional
-            logger.warning(
-                "%s amount angepasst → %.8f %s (≈%.2f %s) um Notional-Minimum %.2f zu erfuellen",
-                self.pair, dynamic_amount, base, dynamic_amount * self.current_price, self.quote, min_notional,
-            )
-
-        grid_count = self.pair_grid_count
-        buy_count = grid_count // 2
-        sell_count = grid_count - buy_count
-        max_buy_orders = int(usdt_balance / (dynamic_amount * self.current_price)) if self.current_price > 0 else 0
-        max_sell_orders = int(base_free / dynamic_amount) if dynamic_amount > 0 else 0
-        affordable = max_buy_orders + max_sell_orders
-
-        if affordable < grid_count:
-            old_count = grid_count
-            grid_count = max(2, affordable)
-            self.pair_grid_count = grid_count
-            self.grid.grid_count = grid_count
-            logger.warning(
-                "%s Grid reduziert: %d → %d Level (max %d Buy + %d Sell leistbar)",
-                self.pair, old_count, grid_count, min(max_buy_orders, grid_count // 2), min(max_sell_orders, grid_count - grid_count // 2),
-            )
-
-        logger.info(
-            "%s Order-Sizing — %s: %.4f frei, %s: %.8f frei, amount: %.8f (≈%.2f %s), %d Level, minNotional: %.2f",
-            self.pair, self.quote, usdt_balance, base, base_free,
-            dynamic_amount, dynamic_amount * self.current_price, self.quote,
-            grid_count, min_notional,
+        alloc = allocator.allocate(
+            self.pair, balance, self.current_price,
+            pair_count, min_notional, step_size,
         )
+        self.apply_allocation(alloc)
 
-        self.grid.calculate_grid(self.current_range, self.current_price, dynamic_amount)
+        if alloc.grid_count < 2:
+            logger.warning("%s: Nicht genug Kapital fuer Grid (Equity: %.2f)", self.pair, alloc.total_equity)
+            self._grid_issue = "Nicht genug Kapital"
+            return
+
+        self._ensure_range_fits(alloc)
+
+        self.grid.calculate_grid(self.current_range, self.current_price, alloc.amount_per_order)
 
         try:
             placed = await self.order_mgr.place_grid_orders(self.pair)
@@ -223,19 +185,56 @@ class PairBot:
 
         actual_levels = len(self.grid.state.levels)
         logger.info(
-            "%s initialized: price=%.2f, range=[%.2f, %.2f], levels=%d",
+            "%s initialized: price=%.2f, range=[%.2f, %.2f], %dB+%dS=%d levels, %.8f/order",
             self.pair, self.current_price, self.current_range.lower,
-            self.current_range.upper, actual_levels,
+            self.current_range.upper, alloc.buy_count, alloc.sell_count,
+            actual_levels, alloc.amount_per_order,
         )
 
         if self.cloud and self.cloud.connected:
             asyncio.create_task(self.cloud.log_event(
-                "system", f"{self.pair} gestartet — {actual_levels} Level, Preis {self.current_price:.2f}",
+                "system", f"{self.pair} gestartet — {alloc.buy_count}B+{alloc.sell_count}S={actual_levels} Level",
                 {"pair": self.pair, "price": self.current_price,
                  "range": [self.current_range.lower, self.current_range.upper],
-                 "levels": actual_levels, "amount": dynamic_amount,
-                 "quote_free": usdt_balance, "base_free": base_free},
+                 "levels": actual_levels, "buy_count": alloc.buy_count,
+                 "sell_count": alloc.sell_count, "amount": alloc.amount_per_order,
+                 "equity": alloc.total_equity, "reserve": alloc.reserve_usdc,
+                 "rebalance": alloc.rebalance_needed},
             ))
+
+    def _ensure_range_fits(self, alloc: AllocationResult):
+        """Widen range if needed to fit all grid levels with fee-spacing."""
+        price = self.current_price
+        min_fee_spacing = price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
+        buy_half = max(alloc.buy_count, 1) * min_fee_spacing * 1.15
+        sell_half = max(alloc.sell_count, 1) * min_fee_spacing * 1.15
+
+        need_lower = price - buy_half
+        need_upper = price + sell_half
+
+        changed = False
+        new_lower = self.current_range.lower
+        new_upper = self.current_range.upper
+
+        if self.current_range.lower > need_lower:
+            new_lower = need_lower
+            changed = True
+        if self.current_range.upper < need_upper:
+            new_upper = need_upper
+            changed = True
+
+        if changed:
+            old_spread = self.current_range.spread
+            self.current_range = RangeResult(
+                upper=new_upper, lower=new_lower, mid=price,
+                atr=self.current_range.atr, source=self.current_range.source,
+                confidence=self.current_range.confidence,
+            )
+            logger.info(
+                "%s Range angepasst: %.2f → %.2f (%dB braucht %.2f unten, %dS braucht %.2f oben)",
+                self.pair, old_spread, self.current_range.spread,
+                alloc.buy_count, buy_half, alloc.sell_count, sell_half,
+            )
 
     async def update_tick(self, price: float):
         """Process a price update."""
@@ -373,6 +372,7 @@ class PairBot:
             for o in sorted(open_orders, key=lambda x: x.price)
         ]
         unplaced = len(self.grid.get_levels_to_place())
+        alloc = self.last_allocation
         return {
             "pair": self.pair,
             "price": self.current_price,
@@ -380,12 +380,20 @@ class PairBot:
             "range_source": self.current_range.source if self.current_range else "N/A",
             "grid_levels": len(self.grid.state.levels),
             "grid_configured": self.pair_grid_count,
+            "grid_buy_count": self.pair_buy_count,
+            "grid_sell_count": self.pair_sell_count,
             "active_orders": len(open_orders),
             "filled_orders": len(self.order_mgr.get_filled_orders(self.pair)),
             "unplaced_orders": unplaced,
             "grid_issue": self._grid_issue if unplaced > 0 else "",
             "open_orders": orders_list,
             "last_prediction": self.last_prediction,
+            "allocation": {
+                "equity": alloc.total_equity if alloc else 0,
+                "reserve": alloc.reserve_usdc if alloc else 0,
+                "amount_per_order": alloc.amount_per_order if alloc else 0,
+                "rebalance_needed": alloc.rebalance_needed if alloc else False,
+            },
             **self.tracker.get_summary(self.pair),
         }
 
@@ -404,6 +412,7 @@ class MultiPairBot:
         )
         self.telegram = TelegramNotifier(config.telegram)
         self.cloud = CloudSync(config.cloud)
+        self.allocator = CapitalAllocator()
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
         self._running = False
@@ -556,9 +565,10 @@ class MultiPairBot:
                           self.tracker, self.telegram, ml, self.cloud)
             self.pair_bots[pair] = bot
 
+        pair_count = len(self.pair_bots)
         for pair, bot in self.pair_bots.items():
             try:
-                await bot.initialize()
+                await bot.initialize(self.allocator, pair_count)
             except Exception as e:
                 logger.error("Failed to initialize %s [%s]: %s", pair, type(e).__name__, e or "(kein Detail)")
                 import traceback
@@ -849,132 +859,87 @@ class MultiPairBot:
             logger.debug("Wallet fetch failed: %s", e)
             return {}
 
-    @staticmethod
-    def _score_grid(n: int, half_equity: float, price: float,
-                    min_amount: float, step_size: float) -> tuple[float, float]:
-        """Score a grid level count by expected daily return. Returns (score, amount)."""
-        import math as _m
-        ROUNDTRIP_FEE = 0.002
-        DAILY_VOL = 0.025
-        R = DAILY_VOL * 1.2
-
-        per_side = n // 2
-        raw = half_equity / (per_side * price)
-        amount = _m.ceil(raw / step_size) * step_size
-        if amount * price * per_side > half_equity * 1.05:
-            amount = min_amount
-        if amount < min_amount:
-            return (-1.0, min_amount)
-        if amount * price * per_side > half_equity * 1.05:
-            return (-1.0, min_amount)
-
-        order_val = amount * price
-        positions = [((i + 1) / per_side) ** 0.6 for i in range(per_side)]
-
-        daily = 0.0
-        for i in range(per_side):
-            dist = R * positions[i]
-            spacing = dist if i == 0 else R * (positions[i] - positions[i - 1])
-            if spacing <= ROUNDTRIP_FEE:
-                continue
-            profit = (spacing - ROUNDTRIP_FEE) * order_val
-            rt = min(3.0, DAILY_VOL / (2 * dist) * 0.5)
-            daily += profit * rt
-        return (daily, amount)
-
     async def _auto_adjust_grid(self):
-        """Adjust grid to maximize expected return — runs every ~5 minutes."""
-        import math
-
+        """Re-evaluate capital allocation and adjust grids every ~5 minutes."""
         pair_count = len(self.pair_bots)
         for pair, bot in list(self.pair_bots.items()):
             try:
-                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
-                quote_bal = balance.get(bot.quote, {})
-                base_name = pair.split("/")[0]
-                base_bal = balance.get(base_name, {})
                 price = bot.current_price or 0
-
                 if price <= 0:
                     continue
 
-                quote_free = quote_bal.get("free", 0) + quote_bal.get("used", 0)
-                base_free = base_bal.get("free", 0) + base_bal.get("used", 0)
-                total_equity = quote_free + base_free * price
-
-                if total_equity <= 0:
-                    continue
-
+                balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
                 market = self.exchange._markets.get(pair, {})
                 min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
                 step_size = market.get("precision", {}).get("amount", 0.00001)
 
-                min_amount = math.ceil((min_notional * 1.15) / price / step_size) * step_size
+                alloc = self.allocator.allocate(
+                    pair, balance, price, pair_count, min_notional, step_size,
+                )
 
-                eq_per_pair = total_equity / max(1, pair_count)
-                half = eq_per_pair * 0.80 / 2
-
-                max_buy = int(half / (min_amount * price)) if price > 0 else 0
-                max_sell = int(base_free / min_amount) if min_amount > 0 else 0
-                max_affordable = (min(max_buy, max_sell) * 2) if max_sell > 0 else (max_buy * 2)
-                max_n = min(max(max_affordable, 4), 12)
-
-                best_n = 4
-                best_score = -1.0
-                best_amount = min_amount
-                for n in range(4, max_n + 1, 2):
-                    score, amount = self._score_grid(n, half, price, min_amount, step_size)
-                    if score > best_score:
-                        best_score = score
-                        best_n = n
-                        best_amount = amount
-
-                configured = bot.pair_grid_count
-                if best_n != configured and abs(best_n - configured) >= 2:
-                    old = configured
-                    bot.pair_grid_count = best_n
-                    bot.pair_amount = best_amount
-
-                    bot.grid = GridEngine(
-                        grid_count=best_n,
-                        spacing_percent=self.config.grid.spacing_percent,
-                        amount_per_order=best_amount,
-                        infinity_mode=self.config.grid.infinity_mode,
-                        trail_trigger_percent=self.config.grid.trail_trigger_percent,
+                if alloc.rebalance_needed and alloc.rebalance_action:
+                    await self._execute_rebalance(alloc.rebalance_action)
+                    balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+                    alloc = self.allocator.allocate(
+                        pair, balance, price, pair_count, min_notional, step_size,
                     )
-                    bot.order_mgr.grid = bot.grid
 
-                    if bot.current_range and price:
-                        min_fs = price * GridEngine.FEE_RATE * 2 * GridEngine.MIN_SPACING_VS_FEE
-                        lps = max(best_n // 2, 1)
-                        min_hr = lps * min_fs * 1.15
-                        if bot.current_range.spread < min_hr * 2:
-                            bot.current_range = RangeResult(
-                                upper=price + min_hr, lower=price - min_hr,
-                                mid=price, atr=bot.current_range.atr,
-                                source=bot.current_range.source,
-                                confidence=bot.current_range.confidence,
-                            )
+                old_buy = bot.pair_buy_count
+                old_sell = bot.pair_sell_count
+                old_amount = bot.pair_amount
+                new_total = alloc.buy_count + alloc.sell_count
+                old_total = old_buy + old_sell
 
-                        await bot.order_mgr.cancel_all(pair)
-                        bot.grid.calculate_grid(bot.current_range, price, best_amount)
-                        await bot.order_mgr.place_grid_orders(pair)
+                changed = (
+                    abs(new_total - old_total) >= 2
+                    or abs(alloc.buy_count - old_buy) >= 1
+                    or abs(alloc.sell_count - old_sell) >= 1
+                    or (old_amount > 0 and abs(alloc.amount_per_order - old_amount) / old_amount > 0.15)
+                )
 
-                    daily_pct = (best_score / eq_per_pair * 100) if eq_per_pair > 0 else 0
+                if changed and new_total >= 2:
+                    bot.apply_allocation(alloc)
+                    bot._ensure_range_fits(alloc)
+
+                    await bot.order_mgr.cancel_all(pair)
+                    bot.grid.calculate_grid(bot.current_range, price, alloc.amount_per_order)
+                    await bot.order_mgr.place_grid_orders(pair)
+
                     logger.info(
-                        "%s Auto-Grid: %d → %d Level (~%.2f%%/Tag, Kapital: %.2f %s, %.8f %s/Order, max %d leistbar)",
-                        pair, old, best_n, daily_pct, total_equity, bot.quote,
-                        best_amount, base_name, max_affordable,
+                        "%s Auto-Grid: %dB+%dS → %dB+%dS, %.8f/Order (Equity: %.2f)",
+                        pair, old_buy, old_sell, alloc.buy_count, alloc.sell_count,
+                        alloc.amount_per_order, alloc.total_equity,
                     )
                     if self.cloud.connected:
                         asyncio.create_task(self.cloud.log_event(
-                            "grid", f"Auto-Grid: {old} → {best_n} Level (~{daily_pct:.2f}%/Tag)",
-                            {"pair": pair, "old_levels": old, "new_levels": best_n,
-                             "daily_pct": daily_pct, "equity": total_equity, "amount": best_amount,
-                             "max_affordable": max_affordable},
+                            "grid", f"Auto-Grid: {old_total} → {new_total} Level ({alloc.buy_count}B+{alloc.sell_count}S)",
+                            {"pair": pair, "old_buy": old_buy, "old_sell": old_sell,
+                             "new_buy": alloc.buy_count, "new_sell": alloc.sell_count,
+                             "amount": alloc.amount_per_order, "equity": alloc.total_equity,
+                             "rebalanced": alloc.rebalance_needed},
                         ))
             except Exception as e:
                 logger.warning("Auto-grid adjust failed for %s: %s", pair, e)
+
+    async def _execute_rebalance(self, action: dict):
+        """Execute a small market order to rebalance capital."""
+        try:
+            pair = action["pair"]
+            side = action["side"]
+            amount = action["amount"]
+            result = await self.exchange.async_create_market_order(pair, side, amount)
+            logger.info(
+                "Rebalance: %s %s %.8f @ %.2f",
+                side, pair, result["amount"], result["price"],
+            )
+            if self.cloud.connected:
+                asyncio.create_task(self.cloud.log_event(
+                    "system", f"Rebalance: {side} {pair} {amount:.8f}",
+                    {"side": side, "pair": pair, "amount": amount,
+                     "fill_price": result["price"]},
+                ))
+        except Exception as e:
+            logger.warning("Rebalance fehlgeschlagen: %s", e)
 
     async def _daily_report_loop(self):
         while self._running:
@@ -1052,7 +1017,7 @@ class MultiPairBot:
                               self.tracker, self.telegram, ml, self.cloud)
                 self.pair_bots[pair] = bot
                 try:
-                    await bot.initialize()
+                    await bot.initialize(self.allocator, len(self.pair_bots))
                     logger.info("%s hinzugefuegt und initialisiert", pair)
                 except Exception as e:
                     logger.error("Initialisierung von %s fehlgeschlagen: %s", pair, e)
@@ -1113,27 +1078,24 @@ class MultiPairBot:
 
             if any(k.startswith("grid.") for k in updated):
                 for pair, bot in list(self.pair_bots.items()):
-                    bot.pair_grid_count = self.config.grid.grid_count
-                    bot.pair_amount = self.config.grid.amount_per_order
-                    bot.grid = GridEngine(
-                        grid_count=bot.pair_grid_count,
-                        spacing_percent=self.config.grid.spacing_percent,
-                        amount_per_order=bot.pair_amount,
-                        infinity_mode=self.config.grid.infinity_mode,
-                        trail_trigger_percent=self.config.grid.trail_trigger_percent,
-                    )
-                    bot.order_mgr.grid = bot.grid
                     if bot.current_range and bot.current_price:
                         try:
+                            balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
+                            market = self.exchange._markets.get(pair, {})
+                            min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
+                            step_size = market.get("precision", {}).get("amount", 0.00001)
+                            alloc = self.allocator.allocate(
+                                pair, balance, bot.current_price,
+                                len(self.pair_bots), min_notional, step_size,
+                            )
+                            bot.apply_allocation(alloc)
+                            bot._ensure_range_fits(alloc)
                             await bot.order_mgr.cancel_all(pair)
-                            bot.grid.calculate_grid(bot.current_range, bot.current_price, bot.pair_amount)
+                            bot.grid.calculate_grid(bot.current_range, bot.current_price, alloc.amount_per_order)
                             await bot.order_mgr.place_grid_orders(pair)
                             actual = len(bot.grid.state.levels)
-                            logger.info("%s Grid neu berechnet: %d/%d Level (angefragt/tatsaechlich), %.8f %s/Order",
-                                        pair, bot.pair_grid_count, actual, bot.pair_amount, bot.base)
-                            if actual < bot.pair_grid_count:
-                                logger.warning("%s Nur %d von %d Level moeglich (Range zu eng fuer Fee-Spacing)",
-                                               pair, actual, bot.pair_grid_count)
+                            logger.info("%s Grid neu berechnet: %dB+%dS=%d Level, %.8f/Order",
+                                        pair, alloc.buy_count, alloc.sell_count, actual, alloc.amount_per_order)
                         except Exception as e:
                             logger.error("Grid re-init failed for %s: %s", pair, e)
             if self.cloud.connected:
