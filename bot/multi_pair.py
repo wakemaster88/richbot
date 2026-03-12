@@ -22,9 +22,10 @@ from bot.grid_engine import GridEngine
 from bot.ml_predictor import LSTMPredictor
 from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
-from bot.regime_detector import RegimeDetector, RegimeParams
+from bot.regime_detector import Regime, RegimeDetector, RegimeParams
 from bot.risk_manager import RiskManager
 from bot.telegram_bot import TelegramNotifier
+from bot.trailing_tp import TrailingTakeProfit
 
 try:
     from bot.ws_client import WebSocketClient
@@ -401,6 +402,7 @@ class MultiPairBot:
         self.telegram = TelegramNotifier(config.telegram)
         self.cloud = CloudSync(config.cloud)
         self.allocator = CapitalAllocator()
+        self.trailing_tp = TrailingTakeProfit()
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
         self._running = False
@@ -671,38 +673,128 @@ class MultiPairBot:
                 except Exception as e:
                     logger.error("Range refresh failed for %s: %s", pair, e)
 
+    def _trailing_tp_enabled(self, bot: PairBot) -> bool:
+        """Trailing TP is active except in VOLATILE regime."""
+        return bot.regime.regime != Regime.VOLATILE
+
+    async def _place_counter_order(self, pair: str, bot: PairBot, opposite):
+        """Place a fixed limit counter-order (classic behaviour)."""
+        try:
+            if opposite.side == "buy":
+                order = await self.exchange.async_create_limit_buy(
+                    pair, opposite.amount, opposite.price)
+            else:
+                order = await self.exchange.async_create_limit_sell(
+                    pair, opposite.amount, opposite.price)
+            opposite.order_id = order["id"]
+            bot.order_mgr.orders[order["id"]] = OrderManager.create_managed(
+                order["id"], pair, opposite)
+            bot.risk.add_trailing_stop(opposite.level_id, opposite.side, opposite.price, pair=pair)
+            logger.info("Gegenseite platziert: %s %s @ %.2f", opposite.side, pair, opposite.price)
+        except Exception as e:
+            logger.warning("Gegenseite fehlgeschlagen: %s %s @ %.2f: %s",
+                           opposite.side, pair, opposite.price, e)
+            if self.cloud.connected:
+                asyncio.create_task(self.cloud.log_event(
+                    "error", f"Gegenseite fehlgeschlagen: {opposite.side} @ {opposite.price:.2f}",
+                    {"pair": pair, "side": opposite.side, "price": opposite.price, "reason": str(e)},
+                    level="warn",
+                ))
+
+    async def _execute_trailing_tp(self, entry, pair: str, bot: PairBot):
+        """Execute a market order triggered by trailing TP."""
+        counter_side = "sell" if entry.side == "buy" else "buy"
+        try:
+            result = await self.exchange.async_create_market_order(pair, counter_side, entry.amount)
+            exec_price = result.get("price", entry.trigger_price)
+            if entry.side == "buy":
+                pnl = (exec_price - entry.entry_price) * entry.amount
+                hold_sec = time.time() - entry.created_at
+            else:
+                pnl = (entry.entry_price - exec_price) * entry.amount
+                hold_sec = time.time() - entry.created_at
+
+            profit_pct = pnl / (entry.entry_price * entry.amount) * 100 if entry.entry_price else 0
+
+            logger.info(
+                "Trailing-TP %s: %s %s %.8f @ %.2f (Entry %.2f, %s %.2f, PnL %.4f / %.2f%%)",
+                entry.trigger_reason, counter_side, pair, entry.amount, exec_price,
+                entry.entry_price,
+                "High" if entry.side == "buy" else "Low",
+                entry.highest if entry.side == "buy" else entry.lowest,
+                pnl, profit_pct,
+            )
+
+            trade = TradeRecord(
+                timestamp=time.time(), pair=pair, side=counter_side,
+                price=exec_price, amount=entry.amount,
+                fee=exec_price * entry.amount * OrderManager.FEE_RATE,
+                pnl=pnl, grid_level=entry.grid_level_price,
+                order_id=result.get("id", "trailing_tp"),
+            )
+            bot.tracker.record_trade(trade)
+            asyncio.create_task(bot.telegram.alert_fill(pair, counter_side, exec_price, entry.amount, pnl))
+
+            if self.cloud.connected:
+                asyncio.create_task(self.cloud.sync_trade(trade))
+                asyncio.create_task(self.cloud.log_event(
+                    "trailing_tp",
+                    f"Trailing-TP: {counter_side.title()} {pair} @ {exec_price:.2f} "
+                    f"(Entry {entry.entry_price:.2f}, {'High' if entry.side == 'buy' else 'Low'} "
+                    f"{entry.highest if entry.side == 'buy' else entry.lowest:.2f})",
+                    {"pair": pair, "side": counter_side, "entry_price": entry.entry_price,
+                     "exit_price": exec_price, "highest": entry.highest, "lowest": entry.lowest,
+                     "profit_pct": round(profit_pct, 3), "hold_time_sec": round(hold_sec),
+                     "reason": entry.trigger_reason, "pnl": round(pnl, 6)},
+                ))
+        except Exception as e:
+            logger.error("Trailing-TP Market-Order fehlgeschlagen: %s %s: %s", counter_side, pair, e)
+
     async def _poll_loop(self):
         while self._running:
             for pair, bot in self.pair_bots.items():
                 try:
                     ticker = await self.exchange.async_fetch_ticker(pair)
-                    await bot.update_tick(ticker["last"])
+                    price = ticker["last"]
+                    await bot.update_tick(price)
+
+                    use_trailing = self._trailing_tp_enabled(bot)
 
                     filled = await bot.order_mgr.check_fills(pair)
                     for managed in filled:
                         opposite = bot.grid.get_opposite_level(managed.grid_level)
-                        if opposite:
-                            try:
-                                if opposite.side == "buy":
-                                    order = await self.exchange.async_create_limit_buy(
-                                        pair, opposite.amount, opposite.price)
-                                else:
-                                    order = await self.exchange.async_create_limit_sell(
-                                        pair, opposite.amount, opposite.price)
-                                opposite.order_id = order["id"]
-                                bot.order_mgr.orders[order["id"]] = OrderManager.create_managed(
-                                    order["id"], pair, opposite)
-                                bot.risk.add_trailing_stop(opposite.level_id, opposite.side, opposite.price, pair=pair)
-                                logger.info("Gegenseite platziert: %s %s @ %.2f", opposite.side, pair, opposite.price)
-                            except Exception as e:
-                                logger.warning("Gegenseite fehlgeschlagen: %s %s @ %.2f: %s",
-                                               opposite.side, pair, opposite.price, e)
-                                if self.cloud.connected:
-                                    asyncio.create_task(self.cloud.log_event(
-                                        "error", f"Gegenseite fehlgeschlagen: {opposite.side} @ {opposite.price:.2f}",
-                                        {"pair": pair, "side": opposite.side, "price": opposite.price, "reason": str(e)},
-                                        level="warn",
-                                    ))
+                        if opposite and use_trailing:
+                            self.trailing_tp.add_entry(
+                                pair, managed.side, managed.fill_price,
+                                managed.amount, opposite.price,
+                            )
+                        elif opposite:
+                            await self._place_counter_order(pair, bot, opposite)
+
+                    # Check trailing take-profits
+                    triggered, fallbacks = self.trailing_tp.check(pair, price)
+                    for entry in triggered:
+                        await self._execute_trailing_tp(entry, pair, bot)
+                    for entry in fallbacks:
+                        opposite_side = "sell" if entry.side == "buy" else "buy"
+                        logger.info(
+                            "Trailing-TP Fallback: %s %s @ %.2f (Timeout nach %ds)",
+                            opposite_side, pair, entry.grid_level_price,
+                            int(time.time() - entry.created_at),
+                        )
+                        try:
+                            if opposite_side == "buy":
+                                order = await self.exchange.async_create_limit_buy(
+                                    pair, entry.amount, entry.grid_level_price)
+                            else:
+                                order = await self.exchange.async_create_limit_sell(
+                                    pair, entry.amount, entry.grid_level_price)
+                            logger.info("Fallback-Order platziert: %s %s @ %.2f", opposite_side, pair, entry.grid_level_price)
+                        except Exception as e:
+                            logger.warning("Fallback-Order fehlgeschlagen: %s", e)
+
+                    if triggered or fallbacks:
+                        self.trailing_tp.cleanup()
 
                     unplaced = bot.grid.get_levels_to_place()
                     if unplaced:
@@ -1078,7 +1170,13 @@ class MultiPairBot:
         logger.info("Multi-pair bot stopped")
 
     def get_status(self) -> dict:
-        return {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
+        status = {}
+        for pair, bot in self.pair_bots.items():
+            s = bot.get_status()
+            s["trailing_tp"] = self.trailing_tp.to_status(pair)
+            s["trailing_tp_active"] = self._trailing_tp_enabled(bot)
+            status[pair] = s
+        return status
 
     def get_performance(self) -> list[dict]:
         return self.tracker.get_all_summaries()
