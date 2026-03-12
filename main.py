@@ -204,12 +204,31 @@ def run_live(config, args):
     logger.info("Pairs: %s | Pi-Mode: %s", config.pairs, config.is_pi)
 
     from bot.multi_pair import MultiPairBot
+    import signal
 
     bot = MultiPairBot(config)
 
     async def _run():
+        loop = asyncio.get_event_loop()
+        shutdown_event = asyncio.Event()
+
+        def _signal_handler():
+            logger.info("SIGTERM/SIGINT received — graceful shutdown...")
+            shutdown_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _signal_handler)
+            except NotImplementedError:
+                pass
+
         try:
-            await bot.start()
+            start_task = asyncio.create_task(bot.start())
+            shutdown_task = asyncio.create_task(shutdown_event.wait())
+            done, _ = await asyncio.wait(
+                [start_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         except KeyboardInterrupt:
             logger.info("Shutdown requested...")
         finally:

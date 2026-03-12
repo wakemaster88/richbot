@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json as _json
 import logging
+import socket
 import time as _time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -17,6 +18,41 @@ from bot.config import ExchangeConfig
 logger = logging.getLogger(__name__)
 
 _BINANCE = "https://api.binance.com"
+_BINANCE_HOST = "api.binance.com"
+_DNS_CACHE: dict[str, str] = {}
+
+
+def _resolve_dns():
+    """Cache Binance API IP to avoid repeated DNS lookups."""
+    if _BINANCE_HOST not in _DNS_CACHE:
+        try:
+            ip = socket.gethostbyname(_BINANCE_HOST)
+            _DNS_CACHE[_BINANCE_HOST] = ip
+            logger.info("DNS cached: %s → %s", _BINANCE_HOST, ip)
+        except Exception:
+            pass
+
+
+def _urlopen_retry(req_or_url, *, timeout: int = 10, max_retries: int = 3) -> Any:
+    """urlopen with exponential backoff for transient network errors."""
+    delay = 1.0
+    for attempt in range(max_retries + 1):
+        try:
+            return urlopen(req_or_url, timeout=timeout)
+        except URLError as e:
+            reason = str(e.reason) if hasattr(e, "reason") else str(e)
+            is_dns = "name resolution" in reason.lower() or "temporary failure" in reason.lower()
+            if attempt >= max_retries:
+                raise
+            wait = min(60.0 if is_dns else delay, 30.0)
+            logger.debug("Network retry %d/%d (wait %.0fs): %s", attempt + 1, max_retries, wait, reason)
+            _time.sleep(wait)
+            delay = min(delay * 2, 30.0)
+        except Exception:
+            if attempt >= max_retries:
+                raise
+            _time.sleep(min(delay, 30.0))
+            delay = min(delay * 2, 30.0)
 
 
 class Exchange:
@@ -25,6 +61,7 @@ class Exchange:
     def __init__(self, config: ExchangeConfig):
         self.config = config
         self._markets: dict[str, dict] = {}
+        _resolve_dns()
 
     # ── market data ──────────────────────────────────────────────
 
@@ -39,7 +76,7 @@ class Exchange:
         url = f"{_BINANCE}/api/v3/exchangeInfo?{qs}"
         logger.info("Loading markets for %s", symbols)
 
-        resp = urlopen(url, timeout=15)
+        resp = _urlopen_retry(url, timeout=15)
         exchange_info = _json.loads(resp.read().decode())
 
         for sym_data in exchange_info.get("symbols", []):
@@ -113,7 +150,7 @@ class Exchange:
         url = f"{_BINANCE}{path}?{query}&signature={sig}"
         req = Request(url, method=method, headers={"X-MBX-APIKEY": self.config.api_key})
         try:
-            resp = urlopen(req, timeout=10)
+            resp = _urlopen_retry(req, timeout=10)
             return _json.loads(resp.read().decode())
         except HTTPError as e:
             body = ""
@@ -130,7 +167,7 @@ class Exchange:
     def fetch_ticker_http(self, symbol: str) -> dict:
         binance_sym = symbol.replace("/", "")
         url = f"{_BINANCE}/api/v3/ticker/24hr?symbol={binance_sym}"
-        resp = urlopen(url, timeout=10)
+        resp = _urlopen_retry(url, timeout=10)
         d = _json.loads(resp.read().decode())
         return {
             "symbol": symbol,
@@ -145,7 +182,7 @@ class Exchange:
     def fetch_ohlcv_http(self, symbol: str, interval: str = "1h", limit: int = 200) -> list[list]:
         binance_sym = symbol.replace("/", "")
         url = f"{_BINANCE}/api/v3/klines?symbol={binance_sym}&interval={interval}&limit={limit}"
-        resp = urlopen(url, timeout=15)
+        resp = _urlopen_retry(url, timeout=15)
         raw = _json.loads(resp.read().decode())
         return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in raw]
 

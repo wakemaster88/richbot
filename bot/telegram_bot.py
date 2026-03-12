@@ -57,10 +57,9 @@ class TelegramNotifier:
             self._fail_count = 0
         except Exception as e:
             self._fail_count += 1
-            if self._fail_count <= 3:
+            if self._fail_count == 1:
                 logger.error("Telegram send failed: %s", e)
-            if self._fail_count == 3:
-                logger.warning("Telegram nach 3 Fehlern stummgeschaltet (Chat-ID pruefen)")
+                logger.warning("Telegram nach 1. Fehler stummgeschaltet (Chat-ID pruefen)")
                 self._muted = True
 
     # ---- Alerts ----

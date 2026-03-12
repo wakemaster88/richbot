@@ -106,6 +106,17 @@ class OrderManager:
             if allow_sells:
                 sides_allowed.add("sell")
 
+        MAX_OPEN_ORDERS = 20
+        open_count = len(self.get_open_orders(symbol))
+        if open_count >= MAX_OPEN_ORDERS:
+            self.last_fail_reason = f"Max offene Orders erreicht ({MAX_OPEN_ORDERS})"
+            return []
+
+        existing_sigs: set[str] = set()
+        for o in self.orders.values():
+            if o.status == "open" and o.symbol == symbol:
+                existing_sigs.add(f"{o.side}_{o.price:.8f}_{o.amount:.8f}")
+
         levels = self.grid.get_levels_to_place(sides_allowed=sides_allowed)
         placed = []
         self.last_fail_reason = ""
@@ -113,6 +124,14 @@ class OrderManager:
 
         for level in levels:
             if level.level_id in self._paused_levels:
+                continue
+
+            if open_count >= MAX_OPEN_ORDERS:
+                self.last_fail_reason = f"Max offene Orders ({MAX_OPEN_ORDERS})"
+                break
+
+            sig = f"{level.side}_{level.price:.8f}_{level.amount:.8f}"
+            if sig in existing_sigs:
                 continue
             try:
                 if level.side == "buy":
@@ -135,6 +154,8 @@ class OrderManager:
                 )
                 self.orders[order["id"]] = managed
                 placed.append(managed)
+                open_count += 1
+                existing_sigs.add(sig)
 
                 self.risk.add_trailing_stop(level.level_id, level.side, level.price, pair=symbol)
 

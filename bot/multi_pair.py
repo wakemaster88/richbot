@@ -648,7 +648,7 @@ class MultiPairBot:
 
         for pair in self.config.pairs:
             ml = None
-            if self.config.ml.enabled:
+            if self.config.ml.enabled and not self.config.is_pi:
                 from bot.config import PiConfig
                 pi_cfg = self.config.pi if self.config.is_pi else PiConfig()
                 ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
@@ -696,14 +696,16 @@ class MultiPairBot:
         await self.ws.start(self.config.pairs)
 
         tasks = [
-            asyncio.create_task(self._ml_loop()),
             asyncio.create_task(self._equity_loop()),
             asyncio.create_task(self._daily_report_loop()),
             asyncio.create_task(self._range_refresh_loop()),
             asyncio.create_task(self._optimization_loop()),
         ]
+        if not self.config.is_pi:
+            tasks.append(asyncio.create_task(self._ml_loop()))
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
+            tasks.append(asyncio.create_task(self._memory_watchdog()))
 
         try:
             while self._running:
@@ -718,14 +720,16 @@ class MultiPairBot:
         """Fallback polling mode when WebSocket is not available."""
         tasks = [
             asyncio.create_task(self._poll_loop()),
-            asyncio.create_task(self._ml_loop()),
             asyncio.create_task(self._equity_loop()),
             asyncio.create_task(self._daily_report_loop()),
             asyncio.create_task(self._range_refresh_loop()),
             asyncio.create_task(self._optimization_loop()),
         ]
+        if not self.config.is_pi:
+            tasks.append(asyncio.create_task(self._ml_loop()))
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
+            tasks.append(asyncio.create_task(self._memory_watchdog()))
         try:
             while self._running:
                 await asyncio.sleep(1)
@@ -1340,6 +1344,56 @@ class MultiPairBot:
             if collected > 50:
                 logger.debug("GC collected %d objects", collected)
 
+    async def _memory_watchdog(self):
+        """Monitor RSS and take action if memory grows too large (Pi only)."""
+        WARN_MB = 350
+        CRITICAL_MB = 400
+        while self._running:
+            await asyncio.sleep(300)
+            try:
+                rss_mb = 0
+                try:
+                    import resource
+                    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    rss_mb = rss_kb / 1024
+                except Exception:
+                    with open("/proc/self/status") as f:
+                        for line in f:
+                            if line.startswith("VmRSS:"):
+                                rss_mb = int(line.split()[1]) / 1024
+                                break
+
+                if rss_mb <= 0:
+                    continue
+
+                if rss_mb > CRITICAL_MB:
+                    logger.warning("MEMORY CRITICAL: %d MB — saving state and requesting restart", int(rss_mb))
+                    if self.cloud.connected:
+                        await self._persist_state()
+                        asyncio.create_task(self.cloud.log_event(
+                            "memory", f"Kritisch: {int(rss_mb)} MB — Restart angefordert",
+                            {"rss_mb": int(rss_mb)}, level="error",
+                        ))
+                    os._exit(1)
+
+                elif rss_mb > WARN_MB:
+                    logger.warning("MEMORY WARNING: %d MB — aggressive GC", int(rss_mb))
+                    gc.collect()
+                    for bot in self.pair_bots.values():
+                        stats = self.tracker._get_pair_stats(bot.pair)
+                        if len(stats.equity_history) > 200:
+                            stats.equity_history = stats.equity_history[-100:]
+                        if len(stats.pnl_history) > 200:
+                            stats.pnl_history = stats.pnl_history[-100:]
+                    gc.collect()
+                    if self.cloud.connected:
+                        asyncio.create_task(self.cloud.log_event(
+                            "memory", f"Warnung: {int(rss_mb)} MB — GC + History gekuerzt",
+                            {"rss_mb": int(rss_mb)}, level="warn",
+                        ))
+            except Exception as e:
+                logger.debug("Memory watchdog error: %s", e)
+
     def _apply_config(self, payload: dict) -> list[str]:
         """Apply a config payload dict to self.config. Returns list of updated keys."""
         updated: list[str] = []
@@ -1405,6 +1459,30 @@ class MultiPairBot:
 
     async def stop(self):
         self._running = False
+        logger.info("Graceful shutdown starting...")
+
+        # Convert active trailing TPs to limit orders
+        for entry in self.trailing_tp.get_entries():
+            counter_side = "sell" if entry.side == "buy" else "buy"
+            try:
+                if counter_side == "sell":
+                    await self.exchange.async_create_limit_sell(
+                        entry.pair, entry.amount, entry.grid_level_price)
+                else:
+                    await self.exchange.async_create_limit_buy(
+                        entry.pair, entry.amount, entry.grid_level_price)
+                logger.info("Trailing-TP → Limit: %s %s @ %.2f", counter_side, entry.pair, entry.grid_level_price)
+            except Exception as e:
+                logger.warning("Trailing-TP conversion failed: %s", e)
+
+        # Save state before shutdown
+        if self.cloud.connected:
+            try:
+                await self._persist_state()
+                logger.info("State saved before shutdown")
+            except Exception as e:
+                logger.warning("State save on shutdown failed: %s", e)
+
         for pair, bot in self.pair_bots.items():
             await bot.order_mgr.cancel_all(pair)
         if self.ws:
