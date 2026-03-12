@@ -24,6 +24,7 @@ from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
 from bot.regime_detector import Regime, RegimeDetector, RegimeParams
 from bot.risk_manager import RiskManager
+from bot.self_optimizer import SelfOptimizer
 from bot.telegram_bot import TelegramNotifier
 from bot.trailing_tp import TrailingTakeProfit
 
@@ -402,6 +403,7 @@ class MultiPairBot:
         self.telegram = TelegramNotifier(config.telegram)
         self.cloud = CloudSync(config.cloud)
         self.allocator = CapitalAllocator()
+        self.optimizer = SelfOptimizer(self.tracker)
         self.trailing_tp = TrailingTakeProfit()
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
@@ -595,6 +597,7 @@ class MultiPairBot:
             asyncio.create_task(self._equity_loop()),
             asyncio.create_task(self._daily_report_loop()),
             asyncio.create_task(self._range_refresh_loop()),
+            asyncio.create_task(self._optimization_loop()),
         ]
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
@@ -616,6 +619,7 @@ class MultiPairBot:
             asyncio.create_task(self._equity_loop()),
             asyncio.create_task(self._daily_report_loop()),
             asyncio.create_task(self._range_refresh_loop()),
+            asyncio.create_task(self._optimization_loop()),
         ]
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
@@ -915,6 +919,75 @@ class MultiPairBot:
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
             await asyncio.sleep(60)
+
+    async def _optimization_loop(self):
+        """Self-optimize every 6 hours based on recent performance."""
+        await asyncio.sleep(300)  # let the bot settle before first optimization
+        while self._running:
+            await asyncio.sleep(6 * 3600)
+            try:
+                pairs = list(self.pair_bots.keys())
+                if not pairs:
+                    continue
+
+                # Per-pair parameter tuning
+                for pair, bot in self.pair_bots.items():
+                    window = self.optimizer.evaluate(pair)
+                    if window.trade_count < 3:
+                        logger.info("Optimizer: %s — zu wenig Trades (%d), ueberspringe",
+                                    pair, window.trade_count)
+                        continue
+
+                    current_params = {
+                        "spacing_mult": bot.regime.get_grid_params().spacing_mult,
+                        "size_mult": bot.regime.get_grid_params().size_mult,
+                        "range_multiplier": self.config.grid.range_multiplier,
+                    }
+                    adj = self.optimizer.suggest_adjustments(current_params, window)
+
+                    if adj:
+                        if "range_multiplier" in adj:
+                            self.config.grid.range_multiplier = adj["range_multiplier"]
+                        logger.info(
+                            "Optimizer: %s — WR=%.0f%%, Sharpe=%.2f, DD=%.1f%%, Anpassungen: %s",
+                            pair, window.win_rate * 100, window.sharpe_ratio,
+                            window.max_drawdown_pct, adj,
+                        )
+                        if self.cloud.connected:
+                            asyncio.create_task(self.cloud.log_event(
+                                "optimization",
+                                f"Self-Tuning {pair}: {', '.join(f'{k}={v}' for k, v in adj.items())}",
+                                {"pair": pair, "adjustments": adj,
+                                 "win_rate": window.win_rate,
+                                 "sharpe": window.sharpe_ratio,
+                                 "drawdown": window.max_drawdown_pct,
+                                 "trades_24h": window.trade_count,
+                                 "total_pnl_24h": window.total_pnl},
+                            ))
+                    else:
+                        logger.info("Optimizer: %s — keine Anpassung noetig (WR=%.0f%%, Sharpe=%.2f)",
+                                    pair, window.win_rate * 100, window.sharpe_ratio)
+
+                # Multi-pair capital allocation scoring
+                if len(pairs) >= 2:
+                    scores = self.optimizer.score_pairs(pairs)
+                    for s in scores:
+                        logger.info(
+                            "Pair-Score: %s — Sharpe=%.2f, PnL24h=%.4f, Gewicht=%.1f%%",
+                            s.pair, s.sharpe, s.pnl_24h, s.capital_weight * 100,
+                        )
+                    if self.cloud.connected:
+                        asyncio.create_task(self.cloud.log_event(
+                            "optimization",
+                            "Pair-Scoring: " + ", ".join(
+                                f"{s.pair}={s.capital_weight:.0%}" for s in scores),
+                            {"scores": [{"pair": s.pair, "sharpe": s.sharpe,
+                                         "pnl_24h": s.pnl_24h, "weight": s.capital_weight}
+                                        for s in scores]},
+                        ))
+
+            except Exception as e:
+                logger.warning("Optimization loop error: %s", e)
 
     async def _log_analytics_snapshot(self):
         """Log comprehensive analytics every ~5 minutes for dashboard analysis."""
