@@ -20,6 +20,9 @@ interface PairMetrics {
   active_orders: number; filled_orders: number;
   unplaced_orders?: number; grid_issue?: string;
   allocation?: { equity: number; reserve: number; amount_per_order: number; rebalance_needed: boolean };
+  regime?: { regime: string; rsi: number; adx: number; boll_width: number; avg_boll_width: number };
+  trailing_tp?: { pair: string; side: string; entry_price: number; amount: number; highest: number; lowest: number; age_sec: number }[];
+  trailing_tp_active?: boolean;
   total_pnl: number; realized_pnl: number; unrealized_pnl: number;
   trade_count: number; max_drawdown_pct: number; sharpe_ratio: number;
   current_equity: number; buy_count?: number; sell_count?: number;
@@ -881,6 +884,161 @@ function Steuerung({ status, commands, onCommand }: {
   );
 }
 
+// -- Bot Intelligence Panel --
+
+const REGIME_STYLE: Record<string, { label: string; color: string; bg: string }> = {
+  ranging:    { label: "SEITWÄRTS",   color: "var(--up)",   bg: "var(--up-bg)" },
+  trend_up:   { label: "AUFWÄRTS",    color: "#3b82f6",     bg: "rgba(59,130,246,0.12)" },
+  trend_down: { label: "ABWÄRTS",     color: "var(--warn)",  bg: "var(--warn-bg)" },
+  volatile:   { label: "VOLATIL",     color: "var(--down)",  bg: "var(--down-bg)" },
+};
+
+function BotIntelligenzPanel({
+  pairs,
+  optData,
+}: {
+  pairs: [string, PairMetrics][];
+  optData: {
+    optimizations: BotEvent[];
+    regimes: BotEvent[];
+    pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }>;
+  };
+}) {
+  const lastOpt = optData.optimizations[0];
+
+  return (
+    <div className="card p-4 sm:p-5 mb-4">
+      <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold mb-3">
+        Bot-Intelligenz
+      </h3>
+
+      {/* Regime per pair */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+        {pairs.map(([p, m]) => {
+          const regimeKey = m.regime?.regime || "ranging";
+          const rs = REGIME_STYLE[regimeKey] || REGIME_STYLE.ranging;
+          const rsi = m.regime?.rsi ?? 50;
+          const adx = m.regime?.adx ?? 0;
+          const ef = optData.pairRegimes[p];
+          const ttp = ef?.trailing_tp_active;
+
+          const allowBuys = regimeKey === "ranging" || regimeKey === "trend_up"
+            || (regimeKey === "trend_down" && rsi < 40)
+            || (regimeKey === "volatile" && rsi < 30);
+          const allowSells = regimeKey === "ranging" || regimeKey === "trend_down"
+            || (regimeKey === "trend_up" && rsi > 60)
+            || (regimeKey === "volatile" && rsi > 70);
+
+          return (
+            <div key={p} className="rounded-lg p-3" style={{ background: "var(--bg-elevated)" }}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[11px] font-bold text-[var(--text-primary)]">{p}</span>
+                <span className="inline-flex px-2 py-0.5 rounded text-[9px] font-bold uppercase"
+                  style={{ background: rs.bg, color: rs.color }}>
+                  {rs.label}
+                </span>
+              </div>
+
+              {/* Indicators */}
+              <div className="grid grid-cols-3 gap-2 mb-2">
+                <div>
+                  <div className="text-[8px] text-[var(--text-quaternary)] uppercase">RSI</div>
+                  <div className="font-mono text-[12px] font-bold" style={{
+                    color: rsi > 70 ? "var(--down)" : rsi < 30 ? "var(--up)" : "var(--text-secondary)"
+                  }}>{rsi.toFixed(0)}</div>
+                </div>
+                <div>
+                  <div className="text-[8px] text-[var(--text-quaternary)] uppercase">ADX</div>
+                  <div className="font-mono text-[12px] font-bold" style={{
+                    color: adx >= 25 ? "var(--accent)" : "var(--text-tertiary)"
+                  }}>{adx.toFixed(0)}</div>
+                </div>
+                <div>
+                  <div className="text-[8px] text-[var(--text-quaternary)] uppercase">Boll.W</div>
+                  <div className="font-mono text-[12px] font-bold text-[var(--text-secondary)]">
+                    {(m.regime?.boll_width ?? 0).toFixed(3)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Entry Filter + Trailing TP */}
+              <div className="flex flex-wrap gap-1.5 text-[9px]">
+                <span className="inline-flex px-1.5 py-0.5 rounded font-semibold" style={{
+                  background: allowBuys ? "var(--up-bg)" : "var(--down-bg)",
+                  color: allowBuys ? "var(--up)" : "var(--down)",
+                }}>Buys {allowBuys ? "✓" : "✗"}</span>
+                <span className="inline-flex px-1.5 py-0.5 rounded font-semibold" style={{
+                  background: allowSells ? "var(--up-bg)" : "var(--down-bg)",
+                  color: allowSells ? "var(--up)" : "var(--down)",
+                }}>Sells {allowSells ? "✓" : "✗"}</span>
+                {ttp !== undefined && (
+                  <span className="inline-flex px-1.5 py-0.5 rounded font-semibold" style={{
+                    background: ttp ? "rgba(59,130,246,0.12)" : "var(--bg-secondary)",
+                    color: ttp ? "#3b82f6" : "var(--text-tertiary)",
+                  }}>Trail-TP {ttp ? "AN" : "AUS"}{ef?.trailing_tp_count ? ` (${ef.trailing_tp_count})` : ""}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Capital Allocation bars */}
+      {pairs.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider mb-1.5 font-semibold">Kapital-Allokation</div>
+          <div className="flex gap-1.5 h-5 rounded-md overflow-hidden" style={{ background: "var(--bg-secondary)" }}>
+            {pairs.map(([p, m], i) => {
+              const eq = m.allocation?.equity ?? m.current_equity ?? 0;
+              const totalEq = pairs.reduce((s, [, pm]) => s + (pm.allocation?.equity ?? pm.current_equity ?? 0), 0);
+              const pct = totalEq > 0 ? (eq / totalEq) * 100 : 100 / pairs.length;
+              const colors = ["#3b82f6", "var(--up)", "var(--warn)", "var(--accent)"];
+              return (
+                <div key={p} className="flex items-center justify-center text-[8px] font-bold text-white transition-all"
+                  style={{ width: `${pct}%`, background: colors[i % colors.length], minWidth: 30 }}>
+                  {p.split("/")[0]} {pct.toFixed(0)}%
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Last optimization */}
+      {lastOpt && (
+        <div className="rounded-lg p-2.5" style={{ background: "var(--bg-secondary)" }}>
+          <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider mb-1 font-semibold">Letzte Optimierung</div>
+          <div className="text-[11px] text-[var(--text-secondary)]">{lastOpt.message}</div>
+          <div className="text-[9px] text-[var(--text-tertiary)] mt-0.5 font-mono">
+            {new Date(lastOpt.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+          </div>
+        </div>
+      )}
+
+      {/* Regime history (last 3) */}
+      {optData.regimes.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <span className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-semibold self-center">Regime-Verlauf:</span>
+          {optData.regimes.slice(0, 5).map((ev) => {
+            const d = ev.detail as Record<string, string> | null;
+            const newR = d?.new || "ranging";
+            const s = REGIME_STYLE[newR] || REGIME_STYLE.ranging;
+            return (
+              <span key={ev.id} className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold"
+                style={{ background: s.bg, color: s.color }}>
+                {d?.pair?.split("/")[0]} → {s.label}
+                <span className="ml-1 font-normal opacity-60">
+                  {new Date(ev.timestamp).toLocaleString("de-DE", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // -- Dashboard --
 
 export default function Dashboard() {
@@ -890,6 +1048,7 @@ export default function Dashboard() {
   const [commands, setCommands] = useState<CommandRecord[]>([]);
   const [events, setEvents] = useState<BotEvent[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const [optData, setOptData] = useState<{ optimizations: BotEvent[]; regimes: BotEvent[]; pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }> }>({ optimizations: [], regimes: [], pairRegimes: {} });
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
   const [latestCommit, setLatestCommit] = useState<string | null>(null);
@@ -899,13 +1058,14 @@ export default function Dashboard() {
   const demoTrades = useMemo(() => generateDemoTrades(), []);
 
   const refresh = useCallback(async () => {
-    const [s, t, e, c, ev, an] = await Promise.all([
+    const [s, t, e, c, ev, an, opt] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
       fetchJson<Trade[]>("/api/trades?limit=50"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
       fetchJson<CommandRecord[]>("/api/commands?limit=20"),
       fetchJson<BotEvent[]>("/api/events?limit=30"),
       fetchJson<AnalyticsData>("/api/analytics"),
+      fetchJson<typeof optData>("/api/optimization"),
     ]);
 
     if (s?.dbConnected) {
@@ -915,6 +1075,7 @@ export default function Dashboard() {
       setCommands(c || []);
       setEvents(ev || []);
       if (an?.summary) setAnalytics(an);
+      if (opt) setOptData(opt);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -1035,6 +1196,11 @@ export default function Dashboard() {
 
       {/* Wallet */}
       {walletData && <WalletUebersicht wallet={walletData} />}
+
+      {/* Bot Intelligence */}
+      {!isDemo && pairs.length > 0 && (
+        <BotIntelligenzPanel pairs={pairs} optData={optData} />
+      )}
 
       {/* Pair Sections */}
       {pairs.length > 0 ? pairs.map(([p, m]) => (
