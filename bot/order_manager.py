@@ -65,8 +65,14 @@ class OrderManager:
         self._pause_until = 0
         self._consecutive_fails = 0
 
-    async def place_grid_orders(self, symbol: str) -> list[ManagedOrder]:
-        """Place all pending grid orders."""
+    async def place_grid_orders(self, symbol: str,
+                                entry_filter: dict | None = None) -> list[ManagedOrder]:
+        """Place all pending grid orders.
+
+        Args:
+            entry_filter: Optional dict with allow_buys/allow_sells booleans
+                          from the regime detector.
+        """
         can_trade, reason = self.risk.can_trade()
         if not can_trade:
             logger.warning("Trading paused: %s", reason)
@@ -76,6 +82,9 @@ class OrderManager:
         if now < self._pause_until:
             return []
 
+        allow_buys = (entry_filter or {}).get("allow_buys", True)
+        allow_sells = (entry_filter or {}).get("allow_sells", True)
+
         levels = self.grid.get_levels_to_place()
         placed = []
         self.last_fail_reason = ""
@@ -83,6 +92,10 @@ class OrderManager:
 
         for level in levels:
             if level.level_id in self._paused_levels:
+                continue
+            if level.side == "buy" and not allow_buys:
+                continue
+            if level.side == "sell" and not allow_sells:
                 continue
             try:
                 if level.side == "buy":

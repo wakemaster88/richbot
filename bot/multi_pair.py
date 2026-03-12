@@ -22,6 +22,7 @@ from bot.grid_engine import GridEngine
 from bot.ml_predictor import LSTMPredictor
 from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
+from bot.regime_detector import RegimeDetector, RegimeParams
 from bot.risk_manager import RiskManager
 from bot.telegram_bot import TelegramNotifier
 
@@ -56,6 +57,7 @@ class PairBot:
         self.pair_step_size = 0.00001
         self.pair_min_amount = 0.0
         self.last_allocation: AllocationResult | None = None
+        self.regime = RegimeDetector()
 
         self.grid = GridEngine(
             grid_count=self.pair_grid_count,
@@ -160,6 +162,12 @@ class PairBot:
             self.ml, self.config.ml,
         )
 
+        import numpy as _np
+        ohlcv_arr = _np.array(ohlcv, dtype=_np.float64)
+        self.regime.update(ohlcv_arr)
+        rp = self.regime.get_grid_params()
+        allocator.target_quote_ratio = rp.target_ratio
+
         balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
         market = self.exchange._markets.get(self.pair, {})
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
@@ -187,7 +195,7 @@ class PairBot:
         )
 
         try:
-            placed = await self.order_mgr.place_grid_orders(self.pair)
+            placed = await self.order_mgr.place_grid_orders(self.pair, self._entry_filter_dict())
             if len(placed) < len(self.grid.state.levels):
                 self._grid_issue = self.order_mgr.last_fail_reason or "Balance zu niedrig"
         except Exception as e:
@@ -250,7 +258,7 @@ class PairBot:
                     sell_budget=alloc.sell_budget if alloc else None,
                     step_size=self.pair_step_size, min_amount=self.pair_min_amount,
                 )
-                placed = await self.order_mgr.place_grid_orders(self.pair)
+                placed = await self.order_mgr.place_grid_orders(self.pair, self._entry_filter_dict())
 
                 if self.cloud and self.cloud.connected:
                     asyncio.create_task(self.cloud.log_event(
@@ -340,6 +348,10 @@ class PairBot:
         except Exception as e:
             logger.error("Equity update failed for %s: %s", self.pair, e)
 
+    def _entry_filter_dict(self) -> dict:
+        ef = self.regime.get_entry_filter()
+        return {"allow_buys": ef.allow_buys, "allow_sells": ef.allow_sells}
+
     def get_status(self) -> dict:
         open_orders = self.order_mgr.get_open_orders(self.pair)
         orders_list = [
@@ -363,6 +375,7 @@ class PairBot:
             "grid_issue": self._grid_issue if unplaced > 0 else "",
             "open_orders": orders_list,
             "last_prediction": self.last_prediction,
+            "regime": self.regime.to_dict(),
             "allocation": {
                 "equity": alloc.total_equity if alloc else 0,
                 "reserve": alloc.reserve_usdc if alloc else 0,
@@ -652,7 +665,7 @@ class MultiPairBot:
                                 buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
                                 step_size=step_size, min_amount=min_amount,
                             )
-                            await bot.order_mgr.place_grid_orders(pair)
+                            await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                         else:
                             logger.debug("%s: Range refresh — drift %.1f%%, keeping current grid", pair, drift * 100)
                 except Exception as e:
@@ -693,7 +706,7 @@ class MultiPairBot:
 
                     unplaced = bot.grid.get_levels_to_place()
                     if unplaced:
-                        recovered = await bot.order_mgr.place_grid_orders(pair)
+                        recovered = await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                         if recovered:
                             bot._grid_issue = ""
                             if self.cloud.connected:
@@ -727,6 +740,30 @@ class MultiPairBot:
                 await bot.run_ml_prediction()
             await asyncio.sleep(interval)
 
+    async def _update_regimes(self):
+        """Update market regime for all pairs."""
+        import numpy as _np
+        fetch_limit = self.config.pi.ohlcv_fetch_limit if self.config.is_pi else 200
+        for pair, bot in self.pair_bots.items():
+            try:
+                ohlcv = await self.exchange.async_fetch_ohlcv(
+                    pair, timeframe=self.config.atr.timeframe, limit=fetch_limit,
+                )
+                ohlcv_arr = _np.array(ohlcv, dtype=_np.float64)
+                old_regime = bot.regime.regime
+                new_regime = bot.regime.update(ohlcv_arr)
+                if new_regime != old_regime and self.cloud.connected:
+                    rp = bot.regime.get_grid_params()
+                    asyncio.create_task(self.cloud.log_event(
+                        "regime",
+                        f"{pair} Regime: {old_regime.value} → {new_regime.value}",
+                        {"pair": pair, "old": old_regime.value, "new": new_regime.value,
+                         "target_ratio": rp.target_ratio, "spacing_mult": rp.spacing_mult,
+                         "size_mult": rp.size_mult, **bot.regime.to_dict()},
+                    ))
+            except Exception as e:
+                logger.debug("Regime update failed for %s: %s", pair, e)
+
     async def _equity_loop(self):
         cycle = 0
         while self._running:
@@ -735,6 +772,8 @@ class MultiPairBot:
                 return_exceptions=True,
             )
             self.tracker.flush()
+
+            await self._update_regimes()
 
             cycle += 1
             if cycle % 5 == 0:
@@ -853,6 +892,9 @@ class MultiPairBot:
                 if price <= 0:
                     continue
 
+                rp = bot.regime.get_grid_params()
+                self.allocator.target_quote_ratio = rp.target_ratio
+
                 balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
                 market = self.exchange._markets.get(pair, {})
                 min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
@@ -885,7 +927,18 @@ class MultiPairBot:
                 if changed and new_total >= 2:
                     import math as _m
                     min_amount = _m.ceil((min_notional * 1.15) / price / step_size) * step_size
+
+                    if rp.max_levels and new_total > rp.max_levels:
+                        ratio = alloc.buy_count / max(new_total, 1)
+                        alloc.buy_count = max(1, round(rp.max_levels * ratio))
+                        alloc.sell_count = rp.max_levels - alloc.buy_count
+                        alloc.grid_count = rp.max_levels
+
+                    alloc.buy_budget *= rp.size_mult
+                    alloc.sell_budget *= rp.size_mult
+
                     bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
+                    bot.grid.spacing_percent *= rp.spacing_mult
 
                     await bot.order_mgr.cancel_all(pair)
                     bot.grid.calculate_grid(
@@ -894,12 +947,12 @@ class MultiPairBot:
                         buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
                         step_size=step_size, min_amount=min_amount,
                     )
-                    await bot.order_mgr.place_grid_orders(pair)
+                    await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
 
                     logger.info(
-                        "%s Auto-Grid: %dB+%dS → %dB+%dS, avg %.8f/Order (Equity: %.2f)",
+                        "%s Auto-Grid: %dB+%dS → %dB+%dS, avg %.8f/Order (Equity: %.2f, Regime: %s)",
                         pair, old_buy, old_sell, alloc.buy_count, alloc.sell_count,
-                        alloc.amount_per_order, alloc.total_equity,
+                        alloc.amount_per_order, alloc.total_equity, rp.regime.value,
                     )
                     if self.cloud.connected:
                         asyncio.create_task(self.cloud.log_event(
@@ -1089,7 +1142,7 @@ class MultiPairBot:
                                 buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
                                 step_size=step_size, min_amount=min_amount,
                             )
-                            await bot.order_mgr.place_grid_orders(pair)
+                            await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                             actual = len(bot.grid.state.levels)
                             logger.info("%s Grid neu berechnet: %dB+%dS=%d Level, %.8f/Order",
                                         pair, alloc.buy_count, alloc.sell_count, actual, alloc.amount_per_order)
