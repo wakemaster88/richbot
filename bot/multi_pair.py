@@ -31,6 +31,7 @@ from bot.performance_tracker import PerformanceTracker, TradeRecord
 from bot.regime_detector import Regime, RegimeDetector
 from bot.risk_manager import RiskManager
 from bot.self_optimizer import SelfOptimizer
+from bot.spread_monitor import SpreadMonitor
 from bot.telegram_bot import TelegramNotifier
 from bot.news_sentiment import NewsSentiment
 from bot.rl_optimizer import GridBandit, compute_reward
@@ -678,6 +679,7 @@ class MultiPairBot:
         self.inventory = InventoryTracker()
         self.inv_skew = InventorySkew()
         self.cb = CircuitBreaker(base_threshold=config.risk.max_drawdown_percent)
+        self.spread_monitor = SpreadMonitor(config.pairs)
         self.correlation = CorrelationMonitor(config.pairs)
         self.sentiment = NewsSentiment(
             api_key=config.sentiment.api_key,
@@ -1119,6 +1121,21 @@ class MultiPairBot:
                 try:
                     ticker = await self.exchange.async_fetch_ticker(pair)
                     price = ticker["last"]
+                    bid = ticker.get("bid", 0)
+                    ask = ticker.get("ask", 0)
+                    if bid > 0 and ask > 0:
+                        self.spread_monitor.update(pair, bid, ask)
+                        if self.spread_monitor.is_wide_spread(pair):
+                            sp = self.spread_monitor.current_spread_bps(pair)
+                            avg = self.spread_monitor.avg_spread_bps(pair, 60)
+                            logger.warning(
+                                "Wide spread %s: %.1f bps (avg %.1f bps)",
+                                pair, sp, avg,
+                            )
+                            await self.cloud.log_event(
+                                "wide_spread", pair=pair,
+                                details={"bps": round(sp, 1), "avg_bps": round(avg, 1)},
+                            )
                     await bot.update_tick(price)
 
                     use_trailing = self._trailing_tp_enabled(bot)
@@ -1185,6 +1202,10 @@ class MultiPairBot:
     async def _on_ticker(self, symbol: str, ticker: dict):
         bot = self.pair_bots.get(symbol)
         if bot:
+            bid = ticker.get("bid", 0)
+            ask = ticker.get("ask", 0)
+            if bid > 0 and ask > 0:
+                self.spread_monitor.update(symbol, bid, ask)
             await bot.update_tick(ticker.get("last", 0))
 
     async def _on_order_update(self, symbol: str, order: dict):
@@ -1275,6 +1296,7 @@ class MultiPairBot:
                 if corr_metrics:
                     metrics["__correlation__"] = corr_metrics
                 metrics["__circuit_breaker__"] = self.cb.get_metrics()
+                metrics["__spread__"] = self.spread_monitor.get_metrics()
                 wallet = await self._fetch_wallet()
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
@@ -1691,6 +1713,7 @@ class MultiPairBot:
                         "skew": skew_snap,
                         "correlation": self.correlation.get_metrics(),
                         "mtf": bot.mtf.get_metrics(),
+                        "spread": self.spread_monitor.get_pair_metrics(pair),
                     },
                 ))
         except Exception as e:
@@ -1811,7 +1834,11 @@ class MultiPairBot:
                         alloc.sell_count = max(alloc.buy_count, alloc.sell_count)
 
                     bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
-                    bot.grid.spacing_percent *= rp.spacing_mult * self.cb.spacing_mult(pair)
+                    regime_spacing = bot.grid.spacing_percent * rp.spacing_mult * self.cb.spacing_mult(pair)
+                    fee_rate = getattr(self.fee_engine._fees.get(pair), "maker", 0.001)
+                    bot.grid.spacing_percent = self.spread_monitor.optimal_spacing(
+                        pair, regime_spacing / 100.0, fee_rate,
+                    ) * 100.0
 
                     await bot.order_mgr.cancel_all(pair)
                     rp_a = bot.regime.get_grid_params()
@@ -2194,6 +2221,7 @@ class MultiPairBot:
             s = bot.get_status()
             s["trailing_tp"] = self.trailing_tp.to_status(pair)
             s["trailing_tp_active"] = self._trailing_tp_enabled(bot)
+            s["spread"] = self.spread_monitor.get_pair_metrics(pair)
             status[pair] = s
         return status
 

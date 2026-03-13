@@ -51,7 +51,13 @@ interface PairMetrics {
     description: string; needs_rebalance: boolean;
   };
   circuit_breaker?: CBPairStatus;
+  spread?: SpreadData;
   open_orders?: OpenOrder[];
+}
+interface SpreadData {
+  current_bps: number; avg_60m_bps: number; percentile: number;
+  is_wide: boolean;
+  history: { t: number; bps: number }[];
 }
 interface CBPairStatus {
   level: string; drawdown_pct: number; peak_equity: number;
@@ -646,6 +652,44 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
           style={{ background: "color-mix(in srgb, var(--down) 12%, transparent)", color: "var(--down)" }}>
           <span>⚠</span>
           <span>Grid-Abstand ({m.fee_metrics.current_spacing_pct.toFixed(2)}%) zu eng fuer Gebuehren (min. {m.fee_metrics.min_profitable_spacing_pct.toFixed(2)}%)</span>
+        </div>
+      )}
+      {m.spread && m.spread.current_bps > 0 && (
+        <div className="pb-2 border-b border-[var(--border-subtle)] mb-2">
+          <div className="flex items-center justify-between text-[9px] text-[var(--text-quaternary)] mb-1">
+            <span>
+              Spread:{" "}
+              <strong className={`font-mono ${m.spread.is_wide ? "text-[var(--warn)]" : "text-[var(--text-secondary)]"}`}>
+                {m.spread.current_bps.toFixed(1)} bps
+              </strong>
+              <span className="text-[8px] ml-1">(avg: {m.spread.avg_60m_bps.toFixed(1)} bps)</span>
+            </span>
+            <span className={`text-[8px] font-mono ${m.spread.percentile > 80 ? "text-[var(--warn)]" : "text-[var(--text-quaternary)]"}`}>
+              P{m.spread.percentile.toFixed(0)}
+            </span>
+          </div>
+          {m.spread.history.length > 2 && (() => {
+            const pts = m.spread.history;
+            const maxBps = Math.max(...pts.map(p => p.bps), 0.1);
+            const w = 100; const h = 20;
+            const path = pts.map((p, i) => {
+              const x = (i / Math.max(pts.length - 1, 1)) * w;
+              const y = h - (p.bps / maxBps) * h;
+              return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+            }).join(" ");
+            return (
+              <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height: 20 }} preserveAspectRatio="none">
+                <path d={path} fill="none" stroke={m.spread.is_wide ? "var(--warn)" : "var(--accent)"} strokeWidth="1.2" />
+              </svg>
+            );
+          })()}
+          {m.spread.is_wide && (
+            <div className="flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[8px] font-medium"
+              style={{ background: "color-mix(in srgb, var(--warn) 12%, transparent)", color: "var(--warn)" }}>
+              <span>⚠</span>
+              <span>Spread ungewoehnlich weit — Grid automatisch angepasst</span>
+            </div>
+          )}
         </div>
       )}
 
