@@ -33,11 +33,14 @@ interface PairMetrics {
   current_equity: number; buy_count?: number; sell_count?: number;
   annualized_return_pct?: number; fees_paid?: number;
   fee_metrics?: FeeMetrics;
+  avg_slippage_bps?: number; max_slippage_bps?: number;
+  slippage_cost?: number; maker_fill_pct?: number;
   open_orders?: OpenOrder[];
 }
 interface Trade {
   id: string; timestamp: string; pair: string; side: string;
   price: number; amount: number; pnl: number;
+  fillPrice?: number; slippageBps?: number; isMaker?: boolean;
 }
 interface EquityPoint { timestamp: string; equity: number; }
 interface CommandRecord {
@@ -502,6 +505,17 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
                 {m.fee_metrics.net_profit_per_trade_pct > 0 ? "+" : ""}{m.fee_metrics.net_profit_per_trade_pct.toFixed(2)}%
               </strong>
             </span>
+          )}
+          {m.avg_slippage_bps !== undefined && m.avg_slippage_bps > 0 && (
+            <span>
+              Slippage:{" "}
+              <strong className={m.avg_slippage_bps > 5 ? "text-[var(--down)]" : "text-[var(--text-tertiary)]"}>
+                {m.avg_slippage_bps.toFixed(1)} bps
+              </strong>
+            </span>
+          )}
+          {m.maker_fill_pct !== undefined && (
+            <span>Maker: <strong className="text-[var(--text-tertiary)]">{m.maker_fill_pct.toFixed(0)}%</strong></span>
           )}
           {m.annualized_return_pct !== undefined && <span>Rendite: <strong className="text-[var(--text-tertiary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
           {m.fees_paid !== undefined && <span>Gebuehren: <strong className="text-[var(--text-tertiary)]">{fmt(m.fees_paid)}</strong></span>}
@@ -1008,7 +1022,14 @@ function TradesTabelle({ trades, trailingTp, quote = "USDC" }: {
             </div>
             <div className="flex justify-between text-[9px] text-[var(--text-quaternary)]">
               <span className="font-mono">{fmtAmount(t.amount, t.pair.split("/")[0])} ({fmt(t.amount * t.price)} {quote})</span>
-              <span>{new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+              <div className="flex items-center gap-2">
+                {(t.slippageBps ?? 0) > 0 && (
+                  <span className="font-mono" style={{ color: (t.slippageBps ?? 0) > 5 ? "var(--down)" : "var(--text-quaternary)" }}>
+                    {(t.slippageBps ?? 0).toFixed(1)}bps
+                  </span>
+                )}
+                <span>{new Date(t.timestamp).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+              </div>
             </div>
           </div>
         ))}
@@ -1024,6 +1045,7 @@ function TradesTabelle({ trades, trailingTp, quote = "USDC" }: {
               <th className="text-right px-4 py-2 font-medium">Preis</th>
               <th className="text-right px-4 py-2 font-medium">Menge</th>
               <th className="text-right px-4 py-2 font-medium">Wert</th>
+              <th className="text-right px-4 py-2 font-medium">Slip.</th>
               <th className="text-right px-4 py-2 font-medium">PnL</th>
             </tr>
           </thead>
@@ -1042,6 +1064,11 @@ function TradesTabelle({ trades, trailingTp, quote = "USDC" }: {
                 <td className="px-4 py-2 text-right font-mono">{fmt(t.price, 0)}</td>
                 <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmtAmount(t.amount, t.pair.split("/")[0])}</td>
                 <td className="px-4 py-2 text-right font-mono text-[var(--text-tertiary)]">{fmt(t.amount * t.price)} {quote}</td>
+                <td className="px-4 py-2 text-right font-mono text-[10px]" style={{
+                  color: (t.slippageBps ?? 0) > 5 ? "var(--down)" : (t.slippageBps ?? 0) > 0 ? "var(--text-tertiary)" : "var(--text-quaternary)"
+                }}>
+                  {(t.slippageBps ?? 0) > 0 ? `${(t.slippageBps ?? 0).toFixed(1)}` : "—"}
+                </td>
                 <td className="px-4 py-2 text-right font-mono font-semibold" style={{ color: t.pnl >= 0 ? "var(--up)" : "var(--down)" }}>
                   {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)}
                 </td>

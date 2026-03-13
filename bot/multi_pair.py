@@ -91,19 +91,27 @@ class PairBot:
         if managed_order.side == "sell":
             self.record_sell_drain(managed_order.amount)
 
+        actual_fee = managed_order.actual_fee if managed_order.actual_fee > 0 else (
+            managed_order.fill_price * managed_order.amount * OrderManager.FEE_RATE
+        )
         trade = TradeRecord(
             timestamp=managed_order.fill_time,
             pair=self.pair,
             side=managed_order.side,
-            price=managed_order.fill_price,
+            price=managed_order.grid_level.price,
             amount=managed_order.amount,
-            fee=managed_order.fill_price * managed_order.amount * OrderManager.FEE_RATE,
+            fee=actual_fee,
             pnl=managed_order.pnl,
             grid_level=managed_order.grid_level.price,
             order_id=managed_order.order_id,
+            fill_price=managed_order.fill_price,
+            slippage=managed_order.slippage,
+            actual_fee=actual_fee,
+            is_maker=managed_order.is_maker,
         )
         self.tracker.record_trade(trade)
 
+        slip_bps = managed_order.slippage * 10_000
         asyncio.create_task(
             self.telegram.alert_fill(
                 self.pair, managed_order.side, managed_order.fill_price,
@@ -118,12 +126,24 @@ class PairBot:
             asyncio.create_task(self.cloud.log_event(
                 "trade", f"{'Kauf' if managed_order.side == 'buy' else 'Verkauf'} {self.pair} @ {managed_order.fill_price:.2f}",
                 {"side": managed_order.side, "price": managed_order.fill_price,
+                 "limit_price": managed_order.price,
                  "amount": managed_order.amount, "value": round(value, 4),
-                 "fee": round(trade.fee, 6), "pnl": managed_order.pnl,
+                 "fee": round(actual_fee, 6), "pnl": managed_order.pnl,
+                 "slippage_bps": round(slip_bps, 2),
+                 "is_maker": managed_order.is_maker,
                  "cum_pnl": round(summary["realized_pnl"], 4),
                  "trade_nr": summary["trade_count"],
                  "win": managed_order.pnl > 0},
             ))
+
+            if slip_bps > 5.0:
+                asyncio.create_task(self.cloud.log_event(
+                    "warning",
+                    f"Hohe Slippage bei {self.pair}: {slip_bps:.1f}bps",
+                    {"pair": self.pair, "slippage_bps": round(slip_bps, 2),
+                     "limit_price": managed_order.price,
+                     "fill_price": managed_order.fill_price},
+                ))
 
     def apply_allocation(self, alloc: AllocationResult, step_size: float = 0.00001,
                          min_amount: float = 0.0):
@@ -427,6 +447,8 @@ class PairBot:
         """Process a fill from WebSocket."""
         managed = self.order_mgr.process_ws_fill(order_data)
         if managed:
+            asyncio.create_task(self.order_mgr.async_enrich_ws_fill(managed))
+
             opposite = self.grid.get_opposite_level(managed.grid_level)
             if opposite:
                 try:
@@ -967,10 +989,13 @@ class MultiPairBot:
 
             trade = TradeRecord(
                 timestamp=time.time(), pair=pair, side=counter_side,
-                price=exec_price, amount=entry.amount,
+                price=entry.entry_price, amount=entry.amount,
                 fee=exec_price * entry.amount * OrderManager.FEE_RATE,
                 pnl=pnl, grid_level=entry.grid_level_price,
                 order_id=result.get("id", "trailing_tp"),
+                fill_price=exec_price,
+                slippage=0.0,
+                is_maker=False,
             )
             bot.tracker.record_trade(trade)
             asyncio.create_task(bot.telegram.alert_fill(pair, counter_side, exec_price, entry.amount, pnl))
@@ -1063,7 +1088,18 @@ class MultiPairBot:
     async def _on_order_update(self, symbol: str, order: dict):
         bot = self.pair_bots.get(symbol)
         if bot:
-            await bot.update_fill(order)
+            enriched = {
+                "id": order.get("id", ""),
+                "price": order.get("price", 0),
+                "cum_quote_qty": order.get("cost", 0),
+                "cum_qty": order.get("filled", 0),
+                "is_maker": order.get("info", {}).get("m", True),
+            }
+            fee_info = order.get("fee") or {}
+            if fee_info.get("cost"):
+                enriched["commission"] = fee_info["cost"]
+                enriched["commission_asset"] = fee_info.get("currency", "")
+            await bot.update_fill(enriched)
 
     async def _ml_loop(self):
         interval = self.config.ml.prediction_interval_minutes * 60
@@ -1524,6 +1560,10 @@ class MultiPairBot:
                         "portfolio_total": total_usdc,
                         "balances": balances,
                         "issue": bot._grid_issue or None,
+                        "avg_slippage_bps": summary.get("avg_slippage_bps", 0),
+                        "max_slippage_bps": summary.get("max_slippage_bps", 0),
+                        "slippage_cost": summary.get("slippage_cost", 0),
+                        "maker_fill_pct": summary.get("maker_fill_pct", 100),
                         **fee_info,
                     },
                 ))

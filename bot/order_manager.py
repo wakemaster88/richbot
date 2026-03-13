@@ -27,6 +27,9 @@ class ManagedOrder:
     fill_price: float = 0.0
     fill_time: float = 0.0
     pnl: float = 0.0
+    slippage: float = 0.0
+    actual_fee: float = 0.0
+    is_maker: bool = True
 
 
 class OrderManager:
@@ -43,6 +46,7 @@ class OrderManager:
         self.orders: dict[str, ManagedOrder] = {}
         self._fill_callbacks: list = []
         self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
+        self._round_trips_fee: dict[int, float] = {}  # grid_index -> buy_fee
         self.last_fail_reason: str = ""
         self._consecutive_fails: int = 0
         self._paused_levels: set[str] = set()  # level_ids paused due to balance issues
@@ -206,6 +210,36 @@ class OrderManager:
         self.reset_paused_levels()
         logger.info("Cancelled %d orders for %s", cancelled, symbol)
 
+    async def _fetch_real_fill_price(self, managed: ManagedOrder) -> None:
+        """Fetch actual fill price via Exchange API and compute slippage."""
+        try:
+            detail = await self.exchange.async_fetch_order(managed.symbol, managed.order_id)
+            if detail.get("executed_qty", 0) > 0:
+                managed.fill_price = detail["avg_price"]
+        except Exception as e:
+            logger.debug("fetch_order fallback for %s: %s", managed.order_id, e)
+            managed.fill_price = managed.price
+
+        try:
+            trades = await self.exchange.async_fetch_my_trades(managed.symbol, managed.order_id)
+            if trades:
+                total_commission = 0.0
+                maker_fills = 0
+                for t in trades:
+                    if t["commission_asset"] == managed.symbol.split("/")[1]:
+                        total_commission += t["commission"]
+                    else:
+                        total_commission += t["commission"] * t["price"]
+                    if t["is_maker"]:
+                        maker_fills += 1
+                managed.actual_fee = total_commission
+                managed.is_maker = maker_fills > len(trades) / 2
+        except Exception as e:
+            logger.debug("fetch_my_trades fallback for %s: %s", managed.order_id, e)
+
+        if managed.price > 0:
+            managed.slippage = abs(managed.fill_price - managed.price) / managed.price
+
     async def check_fills(self, symbol: str) -> list[ManagedOrder]:
         """Poll for filled orders (used when WebSocket is not available)."""
         filled = []
@@ -217,7 +251,8 @@ class OrderManager:
                 if managed.status == "open" and managed.symbol == symbol and oid not in open_ids:
                     managed.status = "filled"
                     managed.fill_time = time.time()
-                    managed.fill_price = managed.price
+
+                    await self._fetch_real_fill_price(managed)
 
                     self.grid.mark_filled(oid)
 
@@ -232,8 +267,12 @@ class OrderManager:
                         except Exception as e:
                             logger.error("Fill callback error: %s", e)
 
-                    logger.info("Fill detected: %s %s @ %.2f (PnL: %.4f)",
-                                managed.side, symbol, managed.fill_price, pnl)
+                    slip_bps = managed.slippage * 10_000
+                    logger.info(
+                        "Fill detected: %s %s @ %.2f (limit: %.2f, slip: %.1fbps, fee: %.6f, PnL: %.4f)",
+                        managed.side, symbol, managed.fill_price, managed.price,
+                        slip_bps, managed.actual_fee, pnl,
+                    )
 
         except Exception as e:
             logger.error("Error checking fills: %s", e)
@@ -244,7 +283,12 @@ class OrderManager:
         return filled
 
     def process_ws_fill(self, order_data: dict) -> ManagedOrder | None:
-        """Process a fill event from WebSocket."""
+        """Process a fill event from WebSocket (sync — no API lookups).
+
+        Uses data from the executionReport: avg_price from cumQuoteQty/cumQty,
+        plus commission fields. The async enrichment path
+        (async_enrich_ws_fill) can be called afterward for full accuracy.
+        """
         oid = order_data.get("id", "")
         if oid not in self.orders:
             return None
@@ -255,7 +299,27 @@ class OrderManager:
 
         managed.status = "filled"
         managed.fill_time = time.time()
-        managed.fill_price = float(order_data.get("price", managed.price))
+
+        cum_quote = float(order_data.get("cum_quote_qty", 0))
+        cum_qty = float(order_data.get("cum_qty", 0))
+        if cum_quote > 0 and cum_qty > 0:
+            managed.fill_price = cum_quote / cum_qty
+        else:
+            managed.fill_price = float(order_data.get("price", managed.price))
+
+        ws_commission = float(order_data.get("commission", 0))
+        if ws_commission > 0:
+            comm_asset = order_data.get("commission_asset", "")
+            if comm_asset == managed.symbol.split("/")[1]:
+                managed.actual_fee = ws_commission
+            else:
+                managed.actual_fee = ws_commission * managed.fill_price
+
+        managed.is_maker = order_data.get("is_maker", True)
+
+        if managed.price > 0:
+            managed.slippage = abs(managed.fill_price - managed.price) / managed.price
+
         managed.pnl = self._calculate_pnl(managed)
 
         self.grid.mark_filled(oid)
@@ -269,20 +333,29 @@ class OrderManager:
 
         return managed
 
+    async def async_enrich_ws_fill(self, managed: ManagedOrder) -> None:
+        """Post-WS enrichment: fetch real fill details from REST API."""
+        await self._fetch_real_fill_price(managed)
+        managed.pnl = self._calculate_pnl(managed)
+
     def _calculate_pnl(self, order: ManagedOrder) -> float:
         """Calculate realized PnL for a filled grid order.
-        Buy fills record cost; sell fills realize the round-trip profit minus fees."""
-        fee = order.fill_price * order.amount * self.FEE_RATE
+        Uses actual exchange fees when available, otherwise estimates."""
+        fee = order.actual_fee if order.actual_fee > 0 else (
+            order.fill_price * order.amount * self.FEE_RATE
+        )
         idx = order.grid_level.index
 
         if order.side == "buy":
             self._round_trips[idx] = order.fill_price
+            self._round_trips_fee[idx] = fee
             return -fee
 
         buy_price = self._round_trips.pop(idx, None)
         if buy_price is not None:
             gross = (order.fill_price - buy_price) * order.amount
-            return gross - 2 * fee
+            buy_fee = self._round_trips_fee.pop(idx, fee)
+            return gross - buy_fee - fee
         return -fee
 
     def check_trailing_stops(self, current_price: float, pair: str = "") -> list[str]:
@@ -305,10 +378,21 @@ class OrderManager:
         open_orders = self.get_open_orders(symbol)
         filled = self.get_filled_orders(symbol)
         total_pnl = sum(o.pnl for o in filled)
+
+        slippages = [o.slippage for o in filled if o.slippage > 0]
+        avg_slippage = sum(slippages) / len(slippages) if slippages else 0.0
+        max_slippage = max(slippages) if slippages else 0.0
+        total_slippage_cost = sum(
+            o.slippage * o.fill_price * o.amount for o in filled if o.slippage > 0
+        )
+
         return {
             "open_orders": len(open_orders),
             "filled_orders": len(filled),
             "total_pnl": total_pnl,
             "buy_fills": len([o for o in filled if o.side == "buy"]),
             "sell_fills": len([o for o in filled if o.side == "sell"]),
+            "avg_slippage_bps": round(avg_slippage * 10_000, 2),
+            "max_slippage_bps": round(max_slippage * 10_000, 2),
+            "total_slippage_cost": round(total_slippage_cost, 6),
         }

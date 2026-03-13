@@ -287,6 +287,49 @@ class Exchange:
         return [{"id": str(o["orderId"]), "symbol": symbol, "side": o["side"].lower(),
                  "price": float(o["price"]), "amount": float(o["origQty"]), "status": o["status"].lower()} for o in data]
 
+    def fetch_order_http(self, symbol: str, order_id: str) -> dict:
+        """Fetch a single order's details including fill information."""
+        binance_sym = symbol.replace("/", "")
+        data = self._signed_request("GET", "/api/v3/order", {
+            "symbol": binance_sym, "orderId": order_id,
+        })
+        executed_qty = float(data.get("executedQty", 0))
+        cum_quote = float(data.get("cummulativeQuoteQty", 0))
+        avg_price = cum_quote / executed_qty if executed_qty > 0 else float(data.get("price", 0))
+        return {
+            "id": str(data["orderId"]),
+            "symbol": symbol,
+            "side": data["side"].lower(),
+            "price": float(data["price"]),
+            "avg_price": avg_price,
+            "amount": float(data["origQty"]),
+            "executed_qty": executed_qty,
+            "cum_quote_qty": cum_quote,
+            "status": data["status"].lower(),
+        }
+
+    def fetch_my_trades_http(self, symbol: str, order_id: str) -> list[dict]:
+        """Fetch fills/trades for a specific order."""
+        binance_sym = symbol.replace("/", "")
+        data = self._signed_request("GET", "/api/v3/myTrades", {
+            "symbol": binance_sym, "orderId": order_id,
+        })
+        return [{
+            "price": float(t["price"]),
+            "qty": float(t["qty"]),
+            "commission": float(t["commission"]),
+            "commission_asset": t["commissionAsset"],
+            "is_maker": t["isMaker"],
+        } for t in data]
+
+    async def async_fetch_order(self, symbol: str, order_id: str) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.fetch_order_http, symbol, order_id)
+
+    async def async_fetch_my_trades(self, symbol: str, order_id: str) -> list[dict]:
+        import asyncio
+        return await asyncio.to_thread(self.fetch_my_trades_http, symbol, order_id)
+
     # ── async wrappers (run sync HTTP in thread) ─────────────────
 
     async def async_fetch_ticker(self, symbol: str) -> dict:

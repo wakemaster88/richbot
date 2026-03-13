@@ -25,6 +25,10 @@ class TradeRecord:
     pnl: float
     grid_level: float
     order_id: str = ""
+    fill_price: float = 0.0
+    slippage: float = 0.0
+    actual_fee: float = 0.0
+    is_maker: bool = True
 
 
 @dataclass
@@ -43,6 +47,13 @@ class PairPerformance:
     current_equity: float = 0.0
     equity_history: list[tuple[float, float]] = field(default_factory=list)
     pnl_history: list[tuple[float, float]] = field(default_factory=list)
+    slippage_total: float = 0.0
+    slippage_sum: float = 0.0
+    slippage_count: int = 0
+    slippage_max: float = 0.0
+    slippage_cost: float = 0.0
+    maker_fills: int = 0
+    taker_fills: int = 0
 
 
 class PerformanceTracker:
@@ -156,13 +167,32 @@ class PerformanceTracker:
         else:
             stats.sell_count += 1
 
+        if trade.slippage > 0:
+            stats.slippage_sum += trade.slippage
+            stats.slippage_count += 1
+            stats.slippage_max = max(stats.slippage_max, trade.slippage)
+            stats.slippage_cost += trade.slippage * trade.price * trade.amount
+
+        if trade.is_maker:
+            stats.maker_fills += 1
+        else:
+            stats.taker_fills += 1
+
         self._queue_write(
             "INSERT INTO trades (timestamp, pair, side, price, amount, fee, pnl, grid_level, order_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (trade.timestamp, trade.pair, trade.side, trade.price,
-             trade.amount, trade.fee, trade.pnl, trade.grid_level, trade.order_id),
+            (trade.timestamp, trade.pair, trade.side,
+             trade.fill_price if trade.fill_price > 0 else trade.price,
+             trade.amount, trade.actual_fee if trade.actual_fee > 0 else trade.fee,
+             trade.pnl, trade.grid_level, trade.order_id),
         )
-        logger.info("Trade recorded: %s %s %.6f @ %.2f (PnL: %.4f)", trade.side, trade.pair, trade.amount, trade.price, trade.pnl)
+        slip_bps = trade.slippage * 10_000
+        logger.info(
+            "Trade recorded: %s %s %.6f @ %.2f (limit: %.2f, slip: %.1fbps, PnL: %.4f)",
+            trade.side, trade.pair, trade.amount,
+            trade.fill_price if trade.fill_price > 0 else trade.price,
+            trade.price, slip_bps, trade.pnl,
+        )
 
     def update_equity(self, pair: str, equity: float, unrealized_pnl: float = 0.0):
         """Snapshot equity for drawdown tracking."""
@@ -235,6 +265,10 @@ class PerformanceTracker:
 
     def get_summary(self, pair: str) -> dict:
         stats = self._get_pair_stats(pair)
+        avg_slippage_bps = (
+            (stats.slippage_sum / stats.slippage_count * 10_000)
+            if stats.slippage_count > 0 else 0.0
+        )
         return {
             "pair": pair,
             "total_pnl": stats.total_pnl,
@@ -248,6 +282,12 @@ class PerformanceTracker:
             "sharpe_ratio": self.get_sharpe_ratio(pair),
             "annualized_return_pct": self.get_annualized_return(pair),
             "current_equity": stats.current_equity,
+            "avg_slippage_bps": round(avg_slippage_bps, 2),
+            "max_slippage_bps": round(stats.slippage_max * 10_000, 2),
+            "slippage_cost": round(stats.slippage_cost, 6),
+            "maker_fill_pct": round(
+                stats.maker_fills / max(stats.trade_count, 1) * 100, 1
+            ),
         }
 
     def get_all_summaries(self) -> list[dict]:

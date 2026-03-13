@@ -37,17 +37,20 @@ model Command {
 }
 
 model Trade {
-  id        String   @id @default(uuid())
-  botId     String   @map("bot_id")
-  timestamp DateTime
-  pair      String
-  side      String
-  price     Float
-  amount    Float
-  fee       Float
-  pnl       Float
-  gridLevel Float?   @map("grid_level")
-  orderId   String?  @map("order_id")
+  id          String   @id @default(uuid())
+  botId       String   @map("bot_id")
+  timestamp   DateTime
+  pair        String
+  side        String
+  price       Float
+  amount      Float
+  fee         Float
+  pnl         Float
+  gridLevel   Float?   @map("grid_level")
+  orderId     String?  @map("order_id")
+  fillPrice   Float?   @map("fill_price")
+  slippageBps Float?   @map("slippage_bps")
+  isMaker     Boolean? @map("is_maker")
 
   @@index([botId, pair, timestamp(sort: Desc)])
   @@map("trades")

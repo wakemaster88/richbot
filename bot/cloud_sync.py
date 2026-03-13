@@ -162,13 +162,19 @@ class CloudSync:
         if not self._pool:
             return
         try:
+            fill_px = getattr(trade, "fill_price", 0) or trade.price
+            slip_bps = getattr(trade, "slippage", 0) * 10_000
+            is_maker = getattr(trade, "is_maker", True)
+            actual_fee = getattr(trade, "actual_fee", 0) or trade.fee
             async with self._pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO trades (id, bot_id, timestamp, pair, side, price, amount, fee, pnl, grid_level, order_id) "
-                    "VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8, $9, $10, $11)",
+                    "INSERT INTO trades (id, bot_id, timestamp, pair, side, price, amount, fee, pnl, "
+                    "grid_level, order_id, fill_price, slippage_bps, is_maker) "
+                    "VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                     _uid(), self.bot_id, trade.timestamp,
-                    trade.pair, trade.side, trade.price, trade.amount,
-                    trade.fee, trade.pnl, trade.grid_level, trade.order_id,
+                    trade.pair, trade.side, fill_px, trade.amount,
+                    actual_fee, trade.pnl, trade.grid_level, trade.order_id,
+                    fill_px, slip_bps, is_maker,
                 )
         except Exception as e:
             logger.warning("Trade sync failed: %s", e)
