@@ -180,26 +180,22 @@ class RegimeDetector:
         return _REGIME_PARAMS[self._regime]
 
     def get_entry_filter(self) -> EntryFilter:
+        """Grid-friendly entry filter: only block at extreme RSI to keep
+        both sides of the grid operational in all regimes."""
         r = self._regime
         rsi = self._rsi
-        sent = self._sentiment_score
-        conf = self._sentiment_confidence
-        bullish = sent > 0.5 and conf > 0.7
-        bearish = sent < -0.5 and conf > 0.7
 
         if r == Regime.RANGING:
             return EntryFilter(allow_buys=True, allow_sells=True, rsi_value=rsi)
 
         if r == Regime.TREND_UP:
-            sell_thresh = 80.0 if bullish else 72.0
-            return EntryFilter(allow_buys=True, allow_sells=(rsi > sell_thresh), rsi_value=rsi)
+            return EntryFilter(allow_buys=True, allow_sells=True, rsi_value=rsi)
 
         if r == Regime.TREND_DOWN:
-            buy_thresh = 20.0 if bearish else 28.0
-            return EntryFilter(allow_buys=(rsi < buy_thresh), allow_sells=True, rsi_value=rsi)
+            return EntryFilter(allow_buys=True, allow_sells=True, rsi_value=rsi)
 
-        # VOLATILE
-        return EntryFilter(allow_buys=(rsi < 30), allow_sells=(rsi > 70), rsi_value=rsi)
+        # VOLATILE — only block at true extremes
+        return EntryFilter(allow_buys=(rsi < 15), allow_sells=(rsi > 85), rsi_value=rsi)
 
     def to_dict(self) -> dict:
         """Serialise current state for status/logging."""
