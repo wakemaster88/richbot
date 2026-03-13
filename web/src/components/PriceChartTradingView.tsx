@@ -31,7 +31,7 @@ export interface PriceChartProps {
   regime?: string;
 }
 
-const INTERVALS = ["15m", "1h", "4h", "1d"] as const;
+const INTERVALS = ["1m", "3m", "5m", "15m", "1h", "4h", "1d"] as const;
 const REGIME_COLORS: Record<string, string> = {
   ranging: "rgba(34, 197, 94, 0.06)",
   trend_up: "rgba(59, 130, 246, 0.06)",
