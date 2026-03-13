@@ -25,6 +25,7 @@ from bot.grid_engine import GridEngine
 from bot.inventory import InventoryTracker
 from bot.inventory_skew import InventorySkew
 from bot.ml_predictor import LSTMPredictor
+from bot.multi_timeframe import MultiTimeframe
 from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
 from bot.regime_detector import Regime, RegimeDetector
@@ -75,6 +76,7 @@ class PairBot:
         self.pair_min_amount = 0.0
         self.last_allocation: AllocationResult | None = None
         self.regime = RegimeDetector()
+        self.mtf = MultiTimeframe(pair)
 
         self.grid = GridEngine(
             grid_count=self.pair_grid_count,
@@ -650,6 +652,7 @@ class PairBot:
             "inventory": inv_metrics,
             "skew": self.inv_skew.get_metrics(self.pair),
             "circuit_breaker": self.cb.get_pair_status(self.pair),
+            "mtf": self.mtf.get_metrics(),
             **self.tracker.get_summary(self.pair),
         }
 
@@ -901,6 +904,7 @@ class MultiPairBot:
             asyncio.create_task(self._optimization_loop()),
             asyncio.create_task(self._fee_refresh_loop()),
             asyncio.create_task(self._correlation_loop()),
+            asyncio.create_task(self._mtf_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -928,6 +932,7 @@ class MultiPairBot:
             asyncio.create_task(self._optimization_loop()),
             asyncio.create_task(self._fee_refresh_loop()),
             asyncio.create_task(self._correlation_loop()),
+            asyncio.create_task(self._mtf_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -1685,6 +1690,7 @@ class MultiPairBot:
                         **inv_snap,
                         "skew": skew_snap,
                         "correlation": self.correlation.get_metrics(),
+                        "mtf": bot.mtf.get_metrics(),
                     },
                 ))
         except Exception as e:
@@ -1794,6 +1800,16 @@ class MultiPairBot:
                         alloc.amount_per_order *= cb_size
                         logger.info("%s: CB Size-Reduktion → %.0f%%", pair, cb_size * 100)
 
+                    mtf_sig = bot.mtf.signal
+                    if mtf_sig.size_mult != 1.0:
+                        alloc.buy_budget *= mtf_sig.size_mult
+                        alloc.sell_budget *= mtf_sig.size_mult
+                        alloc.amount_per_order *= mtf_sig.size_mult
+                    if mtf_sig.suggested_bias == "buy_heavy":
+                        alloc.buy_count = max(alloc.buy_count, alloc.sell_count)
+                    elif mtf_sig.suggested_bias == "sell_heavy":
+                        alloc.sell_count = max(alloc.buy_count, alloc.sell_count)
+
                     bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                     bot.grid.spacing_percent *= rp.spacing_mult * self.cb.spacing_mult(pair)
 
@@ -1868,6 +1884,18 @@ class MultiPairBot:
                 logger.info("Fee-Engine: Gebuehren aktualisiert")
             except Exception as e:
                 logger.warning("Fee-Refresh fehlgeschlagen: %s", e)
+
+    async def _mtf_loop(self):
+        """Update multi-timeframe analysis every 5 minutes."""
+        await asyncio.sleep(60)
+        while self._running:
+            for pair, bot in self.pair_bots.items():
+                try:
+                    sig = await bot.mtf.update(self.exchange)
+                    bot.regime.set_mtf(sig.trend_alignment, sig.entry_quality)
+                except Exception as e:
+                    logger.debug("MTF update failed for %s: %s", pair, e)
+            await asyncio.sleep(300)
 
     async def _correlation_loop(self):
         """Update cross-pair correlations every 6 hours."""

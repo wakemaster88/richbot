@@ -88,6 +88,8 @@ class RegimeDetector:
         self._boll_width_history: list[float] = []
         self._sentiment_score: float = 0.0
         self._sentiment_confidence: float = 0.0
+        self._mtf_alignment: float = 0.0
+        self._mtf_quality: float = 0.0
 
     @property
     def regime(self) -> Regime:
@@ -102,6 +104,12 @@ class RegimeDetector:
         import math
         self._sentiment_score = max(-1.0, min(1.0, score)) if math.isfinite(score) else 0.0
         self._sentiment_confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 0.0
+
+    def set_mtf(self, trend_alignment: float, entry_quality: float):
+        """Inject multi-timeframe signal for regime nudging."""
+        import math
+        self._mtf_alignment = max(-1.0, min(1.0, trend_alignment)) if math.isfinite(trend_alignment) else 0.0
+        self._mtf_quality = max(0.0, min(1.0, entry_quality)) if math.isfinite(entry_quality) else 0.0
 
     def update(self, ohlcv: np.ndarray) -> Regime:
         """Update regime from OHLCV data + optional sentiment overlay.
@@ -139,12 +147,14 @@ class RegimeDetector:
 
         sent = self._sentiment_score
         conf = self._sentiment_confidence
+        mtf_align = self._mtf_alignment
+        mtf_qual = self._mtf_quality
 
-        # Sentiment shifts the ADX trend-detection threshold
+        adx_trend_threshold = 25.0
         if conf > 0.6 and abs(sent) > 0.3:
-            adx_trend_threshold = 25.0 - (sent * 5.0 * conf)
-        else:
-            adx_trend_threshold = 25.0
+            adx_trend_threshold -= sent * 5.0 * conf
+        if mtf_qual > 0.4 and abs(mtf_align) > 0.3:
+            adx_trend_threshold -= mtf_align * 3.0 * mtf_qual
 
         if self._avg_boll_width > 0 and self._boll_width > 2.0 * self._avg_boll_width:
             self._regime = Regime.VOLATILE
@@ -207,4 +217,6 @@ class RegimeDetector:
             "avg_boll_width": round(self._avg_boll_width, 4),
             "sentiment_score": round(self._sentiment_score, 2),
             "sentiment_confidence": round(self._sentiment_confidence, 2),
+            "mtf_alignment": round(self._mtf_alignment, 2),
+            "mtf_quality": round(self._mtf_quality, 2),
         }
