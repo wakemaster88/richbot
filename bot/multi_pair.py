@@ -1197,6 +1197,52 @@ class MultiPairBot:
 
         self._mon_state["start"] = self._mon_state.get("start", now)
 
+        # Sentiment stale check
+        if self.config.sentiment.enabled and self.sentiment._last_signal:
+            sig_age = now - self.sentiment._last_signal.timestamp
+            alert_key = "sentiment_stale"
+            if sig_age > 3600 and now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                asyncio.create_task(self.cloud.log_event(
+                    "monitoring",
+                    f"Sentiment-Signal veraltet ({int(sig_age / 60)} Min) — Headlines nicht erreichbar?",
+                    {"age_sec": int(sig_age), "source": self.sentiment._last_signal.source},
+                    level="warn",
+                ))
+                self._mon_state["last_alert"][alert_key] = now
+
+        # RL divergence check
+        if self.config.rl.enabled and self.rl._episode_count >= 10:
+            last_10 = self.rl._history[-10:] if self.rl._history else []
+            if last_10:
+                avg_r = sum(h["reward"] for h in last_10) / len(last_10)
+                alert_key = "rl_diverge"
+                if avg_r < -0.5 and now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                    self.rl._exploration = max(self.rl._exploration, 0.30)
+                    asyncio.create_task(self.cloud.log_event(
+                        "monitoring",
+                        f"RL divergiert (avg reward {avg_r:.2f}) — Exploration auf 30% erhoeht",
+                        {"avg_reward_10": round(avg_r, 3), "episodes": self.rl._episode_count},
+                        level="warn",
+                    ))
+                    self._mon_state["last_alert"][alert_key] = now
+                    logger.warning("RL divergiert (avg_reward=%.2f) — exploration auf 30%%", avg_r)
+
+        # RL milestone
+        if self.config.rl.enabled:
+            ep = self.rl._episode_count
+            for milestone in (100, 500, 1000):
+                alert_key = f"rl_milestone_{milestone}"
+                if ep >= milestone and alert_key not in self._mon_state.get("milestones_sent", set()):
+                    if "milestones_sent" not in self._mon_state:
+                        self._mon_state["milestones_sent"] = set()
+                    self._mon_state["milestones_sent"].add(alert_key)
+                    asyncio.create_task(self.cloud.log_event(
+                        "monitoring",
+                        f"RL hat {milestone} Episoden gelernt — Exploration bei {self.rl._exploration * 100:.1f}%",
+                        {"episodes": ep, "exploration": round(self.rl._exploration, 4)},
+                        level="info",
+                    ))
+
     async def _optimization_loop(self):
         """Self-optimize every 6 hours based on recent performance.
 
@@ -1257,6 +1303,14 @@ class MultiPairBot:
                             current_params, heuristic_adj, rl_action,
                         )
 
+                        logger.info(
+                            "Optimizer: pair=%s, heuristic=%s, rl=%s, merged=%s, "
+                            "reward=%.3f, episode=%d, exploration=%.1f%%",
+                            pair, heuristic_adj, rl_action, merged_adj,
+                            reward, self.rl._episode_count,
+                            self.rl._exploration * 100,
+                        )
+
                         if self.cloud.connected:
                             asyncio.create_task(self.cloud.log_event(
                                 "rl_optimization",
@@ -1277,12 +1331,12 @@ class MultiPairBot:
                     if merged_adj:
                         if "range_multiplier" in merged_adj:
                             self.config.grid.range_multiplier = merged_adj["range_multiplier"]
-                        logger.info(
-                            "Optimizer: %s — WR=%.0f%%, Sharpe=%.2f, DD=%.1f%%, Adj: %s%s",
-                            pair, window.win_rate * 100, window.sharpe_ratio,
-                            window.max_drawdown_pct, merged_adj,
-                            " [RL]" if rl_action else "",
-                        )
+                        if not rl_action:
+                            logger.info(
+                                "Optimizer: %s — WR=%.0f%%, Sharpe=%.2f, DD=%.1f%%, Adj: %s",
+                                pair, window.win_rate * 100, window.sharpe_ratio,
+                                window.max_drawdown_pct, merged_adj,
+                            )
                         if self.cloud.connected:
                             asyncio.create_task(self.cloud.log_event(
                                 "optimization",
@@ -1591,7 +1645,21 @@ class MultiPairBot:
                 signal = await self.sentiment.get_signal(self.config.pairs)
                 for bot in self.pair_bots.values():
                     bot.regime.set_sentiment(signal.score, signal.confidence)
-                if abs(signal.score) > 0.5:
+
+                effect = "neutral"
+                if signal.confidence > 0.6 and abs(signal.score) > 0.3:
+                    effect = "ADX-Shift"
+                if signal.score < -0.7 and signal.confidence > 0.8:
+                    effect = "VOLATILE-Override"
+
+                logger.info(
+                    "Sentiment: score=%+.2f, conf=%.0f%%, source=%s, "
+                    "headlines=%d, regime_effect=%s",
+                    signal.score, signal.confidence * 100,
+                    signal.source, len(signal.headlines), effect,
+                )
+
+                if abs(signal.score) > 0.5 and self.cloud.connected:
                     asyncio.create_task(self.cloud.log_event(
                         category="sentiment",
                         level="info",
@@ -1601,13 +1669,9 @@ class MultiPairBot:
                             "confidence": signal.confidence,
                             "headlines": signal.headlines[:5],
                             "source": signal.source,
+                            "regime_effect": effect,
                         },
                     ))
-                    logger.info(
-                        "Sentiment: %.2f conf=%.0f%% src=%s — %s",
-                        signal.score, signal.confidence * 100,
-                        signal.source, signal.reason,
-                    )
             except Exception:
                 logger.exception("Sentiment-Loop Fehler")
             await asyncio.sleep(15 * 60)
@@ -1674,14 +1738,14 @@ class MultiPairBot:
     def _apply_config(self, payload: dict) -> list[str]:
         """Apply a config payload dict to self.config. Returns list of updated keys."""
         updated: list[str] = []
-        sections = ["grid", "atr", "risk", "ml", "telegram", "websocket"]
+        sections = ["grid", "atr", "risk", "ml", "telegram", "websocket", "sentiment", "rl"]
         for section in sections:
             if section in payload:
                 target = getattr(self.config, section, None)
                 if target is None:
                     continue
                 for k, v in payload[section].items():
-                    if hasattr(target, k) and (section != "cloud" or k != "database_url"):
+                    if hasattr(target, k) and k not in ("database_url", "api_key"):
                         setattr(target, k, v)
                         updated.append(f"{section}.{k}")
         if "cloud" in payload:
