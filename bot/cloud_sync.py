@@ -62,6 +62,8 @@ class CloudSync:
             )
             await self._ensure_schema()
             self._running = True
+            self._status = "running"
+            await self.send_heartbeat()
             self._tasks = [
                 asyncio.create_task(self._heartbeat_loop()),
                 asyncio.create_task(self._command_loop()),
