@@ -229,6 +229,7 @@ def _apply_env_overrides(cfg: BotConfig) -> BotConfig:
     env_map["CLOUD_BOT_ID"] = lambda v: setattr(cfg.cloud, "bot_id", v)
     env_map["CLOUD_ENABLED"] = lambda v: setattr(cfg.cloud, "enabled", v.lower() == "true")
     env_map["SENTIMENT_API_KEY"] = lambda v: setattr(cfg.sentiment, "api_key", v)
+    env_map["XAI_API_KEY"] = lambda v: (setattr(cfg.sentiment, "api_key", v) if not cfg.sentiment.api_key else None)
     env_map["SENTIMENT_PROVIDER"] = lambda v: setattr(cfg.sentiment, "provider", v)
     env_map["SENTIMENT_ENABLED"] = lambda v: setattr(cfg.sentiment, "enabled", v.lower() == "true")
     env_map["RL_ENABLED"] = lambda v: setattr(cfg.rl, "enabled", v.lower() == "true")

@@ -1394,13 +1394,28 @@ function AktivitaetsFeed({ events }: { events: BotEvent[] }) {
 
 // -- Controls --
 
-function Steuerung({ status, commands, onCommand }: {
-  status: string; commands: CommandRecord[]; onCommand: (t: string) => void;
+function Steuerung({ status, commands, onCommand, botConfig }: {
+  status: string; commands: CommandRecord[]; onCommand: (t: string) => void; botConfig: Record<string, unknown> | null;
 }) {
   const [logLoading, setLogLoading] = useState(false);
+  const sentCfg = botConfig?.sentiment as Record<string, unknown> | undefined;
+  const rlCfg = botConfig?.rl as Record<string, unknown> | undefined;
   const [sentEnabled, setSentEnabled] = useState(true);
   const [rlEnabled, setRlEnabled] = useState(false);
   const [sentProvider, setSentProvider] = useState("local");
+  const [configLoaded, setConfigLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!botConfig || configLoaded) return;
+    if (sentCfg) {
+      if (typeof sentCfg.enabled === "boolean") setSentEnabled(sentCfg.enabled);
+      if (typeof sentCfg.provider === "string") setSentProvider(sentCfg.provider);
+    }
+    if (rlCfg) {
+      if (typeof rlCfg.enabled === "boolean") setRlEnabled(rlCfg.enabled);
+    }
+    setConfigLoaded(true);
+  }, [botConfig, configLoaded, sentCfg, rlCfg]);
   const laeuft = status === "running";
   const gestoppt = status === "stopped" || status === "paused";
   const stLabels: Record<string, string> = { completed: "OK", failed: "Fehler", pending: "..." };
@@ -1586,6 +1601,7 @@ export default function Dashboard() {
   const [optData, setOptData] = useState<{ optimizations: BotEvent[]; regimes: BotEvent[]; pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }> }>({ optimizations: [], regimes: [], pairRegimes: {} });
   const [piStatus, setPiStatus] = useState<PiStatus | null>(null);
   const [rlStats, setRlStats] = useState<RLStats | null>(null);
+  const [botConfig, setBotConfig] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
   const [latestCommit, setLatestCommit] = useState<string | null>(null);
@@ -1595,7 +1611,7 @@ export default function Dashboard() {
   const demoTrades = useMemo(() => generateDemoTrades(), []);
 
   const refresh = useCallback(async () => {
-    const [s, t, e, c, ev, an, opt, pi, rl] = await Promise.all([
+    const [s, t, e, c, ev, an, opt, pi, rl, cfg] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
       fetchJson<Trade[]>("/api/trades?limit=100"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
@@ -1605,6 +1621,7 @@ export default function Dashboard() {
       fetchJson<typeof optData>("/api/optimization"),
       fetchJson<PiStatus>("/api/pi"),
       fetchJson<RLStats>("/api/rl-stats"),
+      fetchJson<{ config: Record<string, unknown> | null }>("/api/config"),
     ]);
 
     if (s?.dbConnected) {
@@ -1617,6 +1634,7 @@ export default function Dashboard() {
       if (opt) setOptData(opt);
       if (pi) setPiStatus(pi);
       if (rl) setRlStats(rl);
+      if (cfg?.config) setBotConfig(cfg.config);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -1802,7 +1820,7 @@ export default function Dashboard() {
       {/* 7. Bot Health + Activity + Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <BotGesundheit pi={piStatus} status={status} rlStats={rlStats} sentimentEnabled={!isDemo} />
-        <Steuerung status={status.status} commands={commands} onCommand={handleCommand} />
+        <Steuerung status={status.status} commands={commands} onCommand={handleCommand} botConfig={botConfig} />
         {!isDemo && events.length > 0 && <AktivitaetsFeed events={events} />}
       </div>
     </div>

@@ -583,6 +583,7 @@ class MultiPairBot:
         api_secret = os.environ.get("BINANCE_SECRET", "").strip()
         tg_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
         tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        xai_key = os.environ.get("XAI_API_KEY", "").strip()
 
         if api_key:
             self.config.exchange.api_key = api_key
@@ -596,6 +597,9 @@ class MultiPairBot:
             self.config.telegram.bot_token = tg_token
         if tg_chat:
             self.config.telegram.chat_id = tg_chat
+        if xai_key and not self.config.sentiment.api_key:
+            self.config.sentiment.api_key = xai_key
+        self._sync_sentiment_runtime()
 
         logger.info("Config: pairs=%s, grid_count=%d, amount_per_order=%.8f",
                      self.config.pairs, self.config.grid.grid_count, self.config.grid.amount_per_order)
@@ -760,8 +764,7 @@ class MultiPairBot:
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
             tasks.append(asyncio.create_task(self._memory_watchdog()))
-        if self.config.sentiment.enabled:
-            tasks.append(asyncio.create_task(self._sentiment_loop()))
+        tasks.append(asyncio.create_task(self._sentiment_loop()))
 
         try:
             while self._running:
@@ -786,8 +789,7 @@ class MultiPairBot:
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
             tasks.append(asyncio.create_task(self._memory_watchdog()))
-        if self.config.sentiment.enabled:
-            tasks.append(asyncio.create_task(self._sentiment_loop()))
+        tasks.append(asyncio.create_task(self._sentiment_loop()))
         try:
             while self._running:
                 await asyncio.sleep(1)
@@ -1639,9 +1641,20 @@ class MultiPairBot:
                 self.tracker.prune_old_snapshots(keep_days=30)
 
     async def _sentiment_loop(self):
-        """Fetch news sentiment every 15 min and inject into RegimeDetectors."""
+        """Fetch news sentiment every 15 min and inject into RegimeDetectors.
+
+        Always runs; skips fetch when sentiment is disabled in config so
+        the loop reacts immediately when the user enables sentiment via
+        the dashboard.
+        """
         while self._running:
+            if not self.config.sentiment.enabled:
+                await asyncio.sleep(30)
+                continue
+
             try:
+                self._sync_sentiment_runtime()
+
                 signal = await self.sentiment.get_signal(self.config.pairs)
                 for bot in self.pair_bots.values():
                     bot.regime.set_sentiment(signal.score, signal.confidence)
@@ -1674,7 +1687,19 @@ class MultiPairBot:
                     ))
             except Exception:
                 logger.exception("Sentiment-Loop Fehler")
-            await asyncio.sleep(15 * 60)
+            await asyncio.sleep(self.config.sentiment.fetch_interval)
+
+    def _sync_sentiment_runtime(self):
+        """Push current config + env api_key into the live NewsSentiment instance."""
+        import os
+        api_key = self.config.sentiment.api_key or os.environ.get("XAI_API_KEY", "")
+        provider = self.config.sentiment.provider
+        if api_key and provider != "local":
+            self.sentiment._api_key = api_key
+            self.sentiment._provider = provider
+        elif not api_key:
+            self.sentiment._api_key = ""
+            self.sentiment._provider = "local"
 
     async def _gc_loop(self):
         """Periodic garbage collection for memory-constrained Pi."""
@@ -1756,6 +1781,8 @@ class MultiPairBot:
         if "pairs" in payload:
             self.config.pairs = payload["pairs"]
             updated.append("pairs")
+        if any(k.startswith("sentiment.") for k in updated):
+            self._sync_sentiment_runtime()
         if updated:
             logger.info("Config angewendet: %s", updated)
         return updated
