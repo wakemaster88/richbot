@@ -160,14 +160,6 @@ function fmt(n: number, d = 2): string {
   return n.toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
-function simplifyError(e: string): string {
-  if (e.includes("insufficient balance")) return "Guthaben reicht nicht";
-  if (e.includes("NOTIONAL")) return "Betrag unter Mindestvolumen (5 USDC)";
-  if (e.includes("MIN_NOTIONAL")) return "Betrag unter Mindestvolumen";
-  if (e.includes("LOT_SIZE")) return "Menge nicht in erlaubter Schrittgroesse";
-  if (e.includes("paused")) return "Trading pausiert (Drawdown)";
-  return e.length > 60 ? e.slice(0, 57) + "..." : e;
-}
 
 function fmtAmount(n: number, base: string): string {
   if (base === "BTC") {
@@ -349,82 +341,6 @@ function WalletUebersicht({ wallet, targetRatio }: { wallet: WalletData; targetR
   );
 }
 
-// -- Grid Visualization --
-
-function GridVisualisierung({ m }: { m: PairMetrics }) {
-  const orders = m.open_orders || [];
-  if (!orders.length && !m.price) return null;
-
-  const buys = orders.filter(o => o.side === "buy").sort((a, b) => b.price - a.price);
-  const sells = orders.filter(o => o.side === "sell").sort((a, b) => a.price - b.price);
-  const allPrices = [...orders.map(o => o.price), m.price].filter(Boolean);
-  const mn = Math.min(...allPrices);
-  const mx = Math.max(...allPrices);
-  const spread = mx - mn || 1;
-
-  const priceToPct = (p: number) => ((p - mn) / spread) * 100;
-
-  return (
-    <div className="card p-4 sm:p-5 fade-in">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.12em] font-semibold">Grid-Orders</h3>
-        <span className="text-[9px] text-[var(--text-quaternary)] font-mono">
-          {buys.length}B / {sells.length}S = {orders.length}/{m.grid_configured || m.grid_levels}
-        </span>
-      </div>
-
-      {m.grid_issue && (
-        <div className="mb-3 px-2.5 py-1.5 rounded-md text-[9px] flex items-center gap-1.5"
-          style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
-          <span className="font-semibold shrink-0">{m.unplaced_orders || "?"} blockiert:</span>
-          <span className="truncate">{simplifyError(m.grid_issue)}</span>
-        </div>
-      )}
-
-      <div className="relative h-48 rounded-lg overflow-hidden" style={{ background: "var(--bg-secondary)" }}>
-        {/* Price axis labels */}
-        <div className="absolute left-0 top-0 bottom-0 w-14 flex flex-col justify-between py-2 text-[8px] font-mono text-[var(--text-quaternary)] z-10">
-          <span>{fmt(mx, 0)}</span>
-          <span>{fmt((mx + mn) / 2, 0)}</span>
-          <span>{fmt(mn, 0)}</span>
-        </div>
-
-        {/* Order markers */}
-        <div className="absolute left-14 right-0 top-0 bottom-0">
-          {sells.map((o, i) => (
-            <div key={`s-${i}`} className="absolute right-0 h-[2px] transition-all"
-              style={{ bottom: `${priceToPct(o.price)}%`, left: 0, background: "var(--down)", opacity: 0.7 }}>
-              <span className="absolute -top-2.5 right-1 text-[7px] font-mono text-[var(--down)]">V {fmt(o.price, 0)}</span>
-            </div>
-          ))}
-          {buys.map((o, i) => (
-            <div key={`b-${i}`} className="absolute right-0 h-[2px] transition-all"
-              style={{ bottom: `${priceToPct(o.price)}%`, left: 0, background: "var(--up)", opacity: 0.7 }}>
-              <span className="absolute -top-2.5 left-1 text-[7px] font-mono text-[var(--up)]">K {fmt(o.price, 0)}</span>
-            </div>
-          ))}
-          {/* Current price */}
-          {m.price > 0 && (
-            <div className="absolute right-0 h-[3px]" style={{ bottom: `${priceToPct(m.price)}%`, left: 0, background: "var(--accent)", zIndex: 5 }}>
-              <span className="absolute -top-3 left-1/2 -translate-x-1/2 text-[8px] font-mono font-bold px-1 rounded"
-                style={{ background: "var(--accent)", color: "var(--bg-primary)" }}>
-                {fmt(m.price, 0)}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="flex items-center gap-4 mt-2 text-[9px] text-[var(--text-quaternary)]">
-        <span className="flex items-center gap-1"><span className="w-3 h-[2px] rounded" style={{ background: "var(--up)" }} /> Kaufen ({buys.length})</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-[2px] rounded" style={{ background: "var(--down)" }} /> Verkaufen ({sells.length})</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-[3px] rounded" style={{ background: "var(--accent)" }} /> Preis</span>
-        <span className="ml-auto font-mono">{m.range}</span>
-      </div>
-    </div>
-  );
-}
-
 // -- Pair Info Card (compact) --
 
 function PairInfoCard({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; quote?: string }) {
@@ -557,7 +473,10 @@ function PnlChart({ data, quote = "USDC" }: { data: { zeit: string; pnl: number 
 
 interface Kline { t: number; o: number; h: number; l: number; c: number; v: number; }
 
-function PreisChart({ pair, orders, trades: pairTrades, quote = "USDC" }: { pair: string; orders?: OpenOrder[]; trades?: Trade[]; quote?: string }) {
+function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC" }: {
+  pair: string; orders?: OpenOrder[]; trades?: Trade[]; quote?: string;
+  gridMeta?: { levels: number; configured?: number; buyCount?: number; sellCount?: number; range: string; issue?: string; unplaced?: number };
+}) {
   const [klines, setKlines] = useState<Kline[]>([]);
   const [interval, setInterval_] = useState("5m");
   const [error, setError] = useState(false);
@@ -764,8 +683,8 @@ function PreisChart({ pair, orders, trades: pairTrades, quote = "USDC" }: { pair
             }}
           />
           {(orders || []).map((o) => (
-            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "var(--up)" : "var(--down)"} strokeDasharray="4 3" strokeOpacity={0.35}
-              label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "var(--up)" : "var(--down)", fontSize: 8, position: "right" }} />
+            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "#22c55e" : "#ef4444"} strokeDasharray="3 4" strokeOpacity={0.25} strokeWidth={1}
+              label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "#22c55e" : "#ef4444", fontSize: 7, position: o.side === "buy" ? "left" : "right", offset: 4 }} />
           ))}
           <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill={`url(#${gId})`} dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
           <Scatter dataKey="buyMarker" fill="#10b981" stroke="#065f46" strokeWidth={1.5}
@@ -794,31 +713,56 @@ function PreisChart({ pair, orders, trades: pairTrades, quote = "USDC" }: { pair
             }} />
         </ComposedChart>
       </ResponsiveContainer>
-      {visibleTrades.length > 0 && (
-        <div className="flex items-center gap-3 mt-2.5 pt-2 border-t" style={{ borderColor: "var(--border-subtle)" }}>
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full" style={{ background: "rgba(16,185,129,0.15)" }}>
-              <span style={{ color: "#34d399", fontSize: 8, lineHeight: 1 }}>▲</span>
-            </span>
-            <span className="text-[9px] text-[var(--text-quaternary)]">Kauf <strong className="text-[var(--up)] font-mono">{buyCount}</strong></span>
+      {/* Footer: Grid info + Trade summary */}
+      <div className="mt-2.5 pt-2 border-t flex flex-col gap-1.5" style={{ borderColor: "var(--border-subtle)" }}>
+        {/* Grid Orders Row */}
+        {gridMeta && (orders || []).length > 0 && (
+          <div className="flex items-center gap-2 text-[9px]">
+            <span className="text-[var(--text-quaternary)] uppercase tracking-wider font-semibold" style={{ fontSize: 8 }}>Grid</span>
+            <div className="flex items-center gap-1">
+              <span className="inline-block w-2.5 h-[3px] rounded-full" style={{ background: "var(--up)" }} />
+              <span className="text-[var(--text-quaternary)]">{gridMeta.buyCount ?? 0}K</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="inline-block w-2.5 h-[3px] rounded-full" style={{ background: "var(--down)" }} />
+              <span className="text-[var(--text-quaternary)]">{gridMeta.sellCount ?? 0}V</span>
+            </div>
+            <span className="text-[var(--text-quaternary)] font-mono">= {(orders || []).length}/{gridMeta.configured || gridMeta.levels}</span>
+            <span className="text-[var(--text-quaternary)] ml-auto font-mono">{gridMeta.range}</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full" style={{ background: "rgba(239,68,68,0.15)" }}>
-              <span style={{ color: "#fca5a5", fontSize: 8, lineHeight: 1 }}>▼</span>
-            </span>
-            <span className="text-[9px] text-[var(--text-quaternary)]">Verkauf <strong className="text-[var(--down)] font-mono">{sellCount}</strong></span>
+        )}
+        {gridMeta?.issue && (
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[8px]"
+            style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
+            <span className="font-bold shrink-0">{gridMeta.unplaced || "?"} blockiert</span>
+            <span className="truncate">{gridMeta.issue.length > 60 ? gridMeta.issue.slice(0, 57) + "..." : gridMeta.issue}</span>
           </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="text-[9px] text-[var(--text-quaternary)]">Sichtbar PnL</span>
-            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded" style={{
+        )}
+        {/* Trades Row */}
+        {visibleTrades.length > 0 && (
+          <div className="flex items-center gap-3 text-[9px]">
+            <span className="text-[var(--text-quaternary)] uppercase tracking-wider font-semibold" style={{ fontSize: 8 }}>Trades</span>
+            <div className="flex items-center gap-1.5">
+              <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full" style={{ background: "rgba(16,185,129,0.15)" }}>
+                <span style={{ color: "#34d399", fontSize: 7, lineHeight: 1 }}>▲</span>
+              </span>
+              <span className="text-[var(--text-quaternary)] font-mono">{buyCount}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full" style={{ background: "rgba(239,68,68,0.15)" }}>
+                <span style={{ color: "#fca5a5", fontSize: 7, lineHeight: 1 }}>▼</span>
+              </span>
+              <span className="text-[var(--text-quaternary)] font-mono">{sellCount}</span>
+            </div>
+            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ml-auto" style={{
               background: tradePnl >= 0 ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
               color: tradePnl >= 0 ? "#34d399" : "#fca5a5",
             }}>
               {tradePnl >= 0 ? "+" : ""}{tradePnl.toFixed(4)} {quote}
             </span>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -1501,16 +1445,14 @@ export default function Dashboard() {
       {/* 2. Kapital-Verteilung with target ratio */}
       {walletData && <WalletUebersicht wallet={walletData} targetRatio={targetRatio} />}
 
-      {/* 3. Per-Pair: Price Chart + Grid Viz + Info */}
+      {/* 3. Per-Pair: Price Chart (with grid info) + Info */}
       {pairs.length > 0 ? pairs.map(([p, m]) => (
         <div key={p} className="grid grid-cols-1 lg:grid-cols-12 gap-3 mb-3">
-          <div className="lg:col-span-5">
-            <PreisChart pair={p} orders={m.open_orders} trades={trades.filter(t => t.pair === p)} quote={quoteCcy} />
+          <div className="lg:col-span-8">
+            <PreisChart pair={p} orders={m.open_orders} trades={trades.filter(t => t.pair === p)} quote={quoteCcy}
+              gridMeta={{ levels: m.grid_levels, configured: m.grid_configured, buyCount: m.grid_buy_count, sellCount: m.grid_sell_count, range: m.range, issue: m.grid_issue, unplaced: m.unplaced_orders }} />
           </div>
           <div className="lg:col-span-4">
-            <GridVisualisierung m={m} />
-          </div>
-          <div className="lg:col-span-3">
             <PairInfoCard pair={p} m={m} quote={quoteCcy} />
           </div>
         </div>
