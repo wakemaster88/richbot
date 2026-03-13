@@ -28,7 +28,13 @@ interface PairMetrics {
   active_orders: number; filled_orders: number; partially_filled_orders?: number;
   unplaced_orders?: number; grid_issue?: string;
   allocation?: { equity: number; reserve: number; amount_per_order: number; rebalance_needed: boolean };
-  regime?: { regime: string; rsi: number; adx: number; boll_width: number; avg_boll_width: number; sentiment_score?: number; sentiment_confidence?: number };
+  regime?: {
+    regime: string; rsi: number; adx: number; boll_width: number; avg_boll_width: number;
+    confidence?: number; trend_score?: number; volatility_score?: number; ranging_score?: number;
+    sentiment_score?: number; sentiment_confidence?: number;
+    mtf_alignment?: number; mtf_quality?: number;
+    transition_pending?: string | null; transition_countdown?: number;
+  };
   trailing_tp?: { pair: string; side: string; entry_price: number; amount: number; highest: number; lowest: number; age_sec: number }[];
   trailing_tp_active?: boolean;
   total_pnl: number; realized_pnl: number; unrealized_pnl: number;
@@ -296,14 +302,18 @@ function PortfolioHero({ walletTotal, totalPnl, trades, quoteCcy, pairs }: {
             const rs = REGIME_STYLE[regimeKey] || REGIME_STYLE.ranging;
             const ss = m.regime?.sentiment_score ?? 0;
             const sc = m.regime?.sentiment_confidence ?? 0;
+            const conf = m.regime?.confidence ?? 0;
             const sIcon = ss > 0.3 ? "\u25B2" : ss < -0.3 ? "\u25BC" : "";
             const sCol = ss > 0.3 ? "var(--up)" : "var(--down)";
+            const tp = m.regime?.transition_pending;
             return (
               <span key={p} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[9px] font-bold"
                 style={{ background: rs.bg, color: rs.color }}
-                title={sc > 0 ? `News: ${ss > 0 ? "+" : ""}${ss.toFixed(2)} (${(sc * 100).toFixed(0)}%)` : undefined}>
+                title={`Conf: ${conf.toFixed(0)}%` + (sc > 0 ? ` | News: ${ss > 0 ? "+" : ""}${ss.toFixed(2)} (${(sc * 100).toFixed(0)}%)` : "") + (tp ? ` | → ${tp}` : "")}>
                 {p.split("/")[0]} {rs.label}
+                {conf > 0 && <span style={{ fontSize: "7px", opacity: 0.8 }}>({conf.toFixed(0)}%)</span>}
                 {sIcon && <span style={{ color: sCol, fontSize: "8px" }}>{sIcon}</span>}
+                {tp && <span style={{ fontSize: "7px", opacity: 0.7 }}>{"\u2192"}</span>}
               </span>
             );
           })}
@@ -1553,12 +1563,27 @@ function SelbstOptimierungPanel({ optData, pairs, rlStats, onCommand }: {
           const sentIcon = sentScore > 0.3 ? "\u25B2" : sentScore < -0.3 ? "\u25BC" : "\u2500";
           const sentColor = sentScore > 0.3 ? "var(--up)" : sentScore < -0.3 ? "var(--down)" : "var(--text-tertiary)";
 
+          const trendS = m.regime?.trend_score ?? 0;
+          const volS = m.regime?.volatility_score ?? 0;
+          const rangeS = m.regime?.ranging_score ?? 0;
+          const conf = m.regime?.confidence ?? 0;
+          const tp = m.regime?.transition_pending;
+          const tpCount = m.regime?.transition_countdown ?? 0;
+
           return (
             <div key={p} className="rounded-lg p-3" style={{ background: "var(--bg-secondary)" }}>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-bold">{p}</span>
                 <div className="flex items-center gap-1.5">
-                  <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold" style={{ background: rs.bg, color: rs.color }}>{rs.label}</span>
+                  <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold" style={{ background: rs.bg, color: rs.color }}>
+                    {rs.label}
+                    {conf > 0 && <span style={{ opacity: 0.8, marginLeft: 3, fontSize: "7px" }}>({conf.toFixed(0)}%)</span>}
+                  </span>
+                  {tp && (
+                    <span className="text-[7px] px-1 py-px rounded font-semibold" style={{ background: "var(--bg-elevated)", color: "var(--text-tertiary)" }}>
+                      {"\u2192"} {tp} ({tpCount})
+                    </span>
+                  )}
                   <span title={`News: ${sentScore > 0 ? "+" : ""}${sentScore.toFixed(2)} (Conf ${(sentConf * 100).toFixed(0)}%)`} className="text-[10px] font-bold cursor-default" style={{ color: sentColor }}>{sentIcon}</span>
                 </div>
               </div>
@@ -1566,6 +1591,40 @@ function SelbstOptimierungPanel({ optData, pairs, rlStats, onCommand }: {
                 <div className="text-center"><span className="text-[var(--text-quaternary)]">RSI</span> <span className="font-mono font-bold" style={{ color: rsi > 70 ? "var(--down)" : rsi < 30 ? "var(--up)" : "var(--text-secondary)" }}>{rsi.toFixed(0)}</span></div>
                 <div className="text-center"><span className="text-[var(--text-quaternary)]">ADX</span> <span className="font-mono font-bold">{(m.regime?.adx ?? 0).toFixed(0)}</span></div>
                 <div className="text-center"><span className="text-[var(--text-quaternary)]">BollW</span> <span className="font-mono font-bold">{(m.regime?.boll_width ?? 0).toFixed(3)}</span></div>
+              </div>
+              {/* Sub-detector score bars */}
+              <div className="space-y-1 mb-2">
+                {[
+                  { label: "Trend", val: trendS, bipolar: true },
+                  { label: "Volatil.", val: volS, bipolar: false },
+                  { label: "Ranging", val: rangeS, bipolar: false },
+                ].map(({ label, val, bipolar }) => (
+                  <div key={label} className="flex items-center gap-1.5 text-[8px]">
+                    <span className="w-10 text-right text-[var(--text-quaternary)] shrink-0">{label}</span>
+                    <div className="flex-1 h-1.5 rounded-full overflow-hidden relative" style={{ background: "var(--bg-tertiary)" }}>
+                      {bipolar ? (
+                        <>
+                          <div className="absolute top-0 bottom-0 left-1/2 w-px" style={{ background: "var(--border-subtle)" }} />
+                          <div className="absolute top-0 bottom-0 rounded-full transition-all duration-500"
+                            style={{
+                              background: val >= 0 ? "var(--up)" : "var(--down)",
+                              left: val >= 0 ? "50%" : `${50 + val * 50}%`,
+                              width: `${Math.abs(val) * 50}%`,
+                            }} />
+                        </>
+                      ) : (
+                        <div className="absolute top-0 bottom-0 left-0 rounded-full transition-all duration-500"
+                          style={{
+                            width: `${val * 100}%`,
+                            background: val > 0.7 ? "var(--warn)" : "var(--accent)",
+                          }} />
+                      )}
+                    </div>
+                    <span className="w-8 text-right font-mono text-[var(--text-tertiary)] shrink-0">
+                      {bipolar ? (val > 0 ? "+" : "") + val.toFixed(2) : (val * 100).toFixed(0) + "%"}
+                    </span>
+                  </div>
+                ))}
               </div>
               <div className="flex flex-wrap gap-1">
                 <span className="px-1.5 py-0.5 rounded text-[8px] font-semibold" style={{ background: allowBuys ? "var(--up-bg)" : "var(--down-bg)", color: allowBuys ? "var(--up)" : "var(--down)" }}>Buys {allowBuys ? "\u2713" : "\u2717"}</span>
