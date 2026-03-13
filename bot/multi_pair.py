@@ -1775,8 +1775,10 @@ class MultiPairBot:
                     continue
                 for k, v in payload[section].items():
                     if hasattr(target, k) and k not in ("database_url", "api_key"):
-                        setattr(target, k, v)
-                        updated.append(f"{section}.{k}")
+                        old_val = getattr(target, k)
+                        if old_val != v:
+                            setattr(target, k, v)
+                            updated.append(f"{section}.{k}")
         if "cloud" in payload:
             for k, v in payload["cloud"].items():
                 if hasattr(self.config.cloud, k) and k != "database_url":
@@ -1846,6 +1848,12 @@ class MultiPairBot:
                 logger.info("Trailing-TP → Limit: %s %s @ %.2f", counter_side, entry.pair, entry.grid_level_price)
             except Exception as e:
                 logger.warning("Trailing-TP conversion failed: %s", e)
+
+        # Save RL weights before shutdown
+        try:
+            self.rl._save()
+        except Exception:
+            pass
 
         # Save state before shutdown
         if self.cloud.connected:

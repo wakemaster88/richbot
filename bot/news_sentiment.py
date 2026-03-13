@@ -100,8 +100,11 @@ class NewsSentiment:
             return []
 
     def _fetch_headlines_sync(self, pairs: list[str]) -> list[dict]:
-        coins = ",".join(p.split("/")[0] for p in pairs)
-        url = f"{_CRYPTOCOMPARE}?categories={coins}&limit=20"
+        coins = {p.split("/")[0].lower() for p in pairs}
+        keywords = coins | {"crypto", "bitcoin", "btc", "ethereum", "eth",
+                            "solana", "sol", "defi", "sec", "fed", "market"}
+
+        url = f"{_CRYPTOCOMPARE}?lang=EN&limit=30"
         try:
             req = Request(url, headers={"User-Agent": "RichBot/2.0"})
             resp = urlopen(req, timeout=10)
@@ -112,10 +115,10 @@ class NewsSentiment:
 
         raw_items = data.get("Data", [])
         if not raw_items:
-            logger.info("CryptoCompare: 0 Artikel fuer %s (Response-Type: %s)",
-                        coins, data.get("Type", "?"))
+            logger.info("CryptoCompare: 0 Artikel (Response-Type: %s)",
+                        data.get("Type", "?"))
 
-        cutoff = _time.time() - 8 * 3600
+        cutoff = _time.time() - 12 * 3600
         seen: set[str] = set()
         out: list[dict] = []
 
@@ -126,6 +129,11 @@ class NewsSentiment:
             pub = item.get("published_on", 0)
             if pub < cutoff:
                 continue
+            title_low = title.lower()
+            cats = (item.get("categories") or "").lower()
+            relevant = any(k in title_low or k in cats for k in keywords)
+            if not relevant:
+                continue
             seen.add(title)
             out.append({
                 "title": title,
@@ -133,6 +141,8 @@ class NewsSentiment:
                 "published_on": pub,
                 "url": item.get("url", ""),
             })
+        if out:
+            logger.info("CryptoCompare: %d relevante Headlines gefunden", len(out))
         return out[:10]
 
     # ── LLM classification ────────────────────────────────────────
