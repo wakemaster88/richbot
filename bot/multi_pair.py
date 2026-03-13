@@ -2351,6 +2351,26 @@ class MultiPairBot:
         def cmd_rl_stats(payload):
             return self.rl.get_stats()
 
+        async def cmd_backtest(payload):
+            from bot.backtest import BacktestEngine, fetch_historical_ohlcv
+            pair = (payload or {}).get("pair", self.config.pairs[0])
+            days = int((payload or {}).get("days", 30))
+            capital = float((payload or {}).get("capital", 200))
+            try:
+                ohlcv = fetch_historical_ohlcv(pair, days, "1h")
+                if len(ohlcv) < 100:
+                    return {"error": f"Nur {len(ohlcv)} Candles — zu wenig Daten"}
+                engine = BacktestEngine(
+                    config=self.config,
+                    initial_capital=capital,
+                    seed=42,
+                )
+                result = await engine.run(pair, ohlcv, days)
+                return result.to_dict()
+            except Exception as e:
+                logger.error("Backtest failed: %s", e)
+                return {"error": str(e)}
+
         self.cloud.on_command("stop", cmd_stop)
         self.cloud.on_command("resume", cmd_resume)
         self.cloud.on_command("pause", cmd_pause)
@@ -2361,3 +2381,4 @@ class MultiPairBot:
         self.cloud.on_command("fetch_logs", cmd_fetch_logs)
         self.cloud.on_command("reset_rl", cmd_reset_rl)
         self.cloud.on_command("rl_stats", cmd_rl_stats)
+        self.cloud.on_command("backtest", cmd_backtest)

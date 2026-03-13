@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing command type" }, { status: 400 });
     }
 
-    const validTypes = ["stop", "resume", "pause", "status", "performance", "update_config", "update_software", "fetch_logs", "reset_rl", "rl_stats"];
+    const validTypes = ["stop", "resume", "pause", "status", "performance", "update_config", "update_software", "fetch_logs", "reset_rl", "rl_stats", "backtest"];
     if (!validTypes.includes(type)) {
       return NextResponse.json({ error: `Invalid command type: ${type}` }, { status: 400 });
     }
