@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from bot.config import BotConfig
 from bot.exchange import Exchange
 from bot.grid_engine import GridEngine, GridLevel
+from bot.inventory import InventoryTracker
 from bot.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
@@ -50,16 +51,16 @@ class OrderManager:
     FEE_RATE = 0.001  # 0.1% default; overridden from exchange if available
 
     def __init__(self, exchange: Exchange, grid_engine: GridEngine,
-                 risk_manager: RiskManager, config: BotConfig):
+                 risk_manager: RiskManager, config: BotConfig,
+                 inventory: InventoryTracker | None = None):
         self.exchange = exchange
         self.grid = grid_engine
         self.risk = risk_manager
         self.config = config
+        self.inventory = inventory or InventoryTracker()
         self.orders: dict[str, ManagedOrder] = {}
         self._fill_callbacks: list = []
         self._partial_fill_callbacks: list = []
-        self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
-        self._round_trips_fee: dict[int, float] = {}  # grid_index -> buy_fee
         self.last_fail_reason: str = ""
         self._consecutive_fails: int = 0
         self._paused_levels: set[str] = set()  # level_ids paused due to balance issues
@@ -528,26 +529,20 @@ class OrderManager:
         managed.pnl = self._calculate_pnl(managed)
 
     def _calculate_pnl(self, order: ManagedOrder) -> float:
-        """Calculate realized PnL for a filled grid order.
-        Uses actual exchange fees when available, otherwise estimates.
-        Uses filled_amount (may differ from original amount on partial fills)."""
+        """Calculate realized PnL via InventoryTracker (position-based, not index-based).
+
+        Buys increase inventory and cost basis; sells realize PnL against
+        the weighted-average cost. Works correctly after grid trail/reset.
+        """
         qty = order.filled_amount if order.filled_amount > 0 else order.amount
         fee = order.actual_fee if order.actual_fee > 0 else (
             order.fill_price * qty * self.FEE_RATE
         )
-        idx = order.grid_level.index
 
         if order.side == "buy":
-            self._round_trips[idx] = order.fill_price
-            self._round_trips_fee[idx] = fee
-            return -fee
-
-        buy_price = self._round_trips.pop(idx, None)
-        if buy_price is not None:
-            gross = (order.fill_price - buy_price) * qty
-            buy_fee = self._round_trips_fee.pop(idx, fee)
-            return gross - buy_fee - fee
-        return -fee
+            return self.inventory.record_buy(order.symbol, order.fill_price, qty, fee)
+        else:
+            return self.inventory.record_sell(order.symbol, order.fill_price, qty, fee)
 
     def check_trailing_stops(self, current_price: float, pair: str = "") -> list[str]:
         """Check trailing stops for a specific pair and return triggered level IDs."""

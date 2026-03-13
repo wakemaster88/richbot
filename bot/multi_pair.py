@@ -20,6 +20,7 @@ from bot.dynamic_range import compute_dynamic_range, detect_range_breakout, shif
 from bot.exchange import Exchange
 from bot.fee_engine import FeeEngine
 from bot.grid_engine import GridEngine
+from bot.inventory import InventoryTracker
 from bot.ml_predictor import LSTMPredictor
 from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
@@ -46,7 +47,8 @@ class PairBot:
                  risk_manager: RiskManager, tracker: PerformanceTracker,
                  telegram: TelegramNotifier, ml_predictor: LSTMPredictor | None = None,
                  cloud: CloudSync | None = None,
-                 fee_engine: FeeEngine | None = None):
+                 fee_engine: FeeEngine | None = None,
+                 inventory: InventoryTracker | None = None):
         self.pair = pair
         self.config = config
         self.exchange = exchange
@@ -56,6 +58,7 @@ class PairBot:
         self.ml = ml_predictor
         self.cloud = cloud
         self.fee_engine = fee_engine
+        self.inventory = inventory or InventoryTracker()
 
         self.pair_grid_count = 4  # will be set by CapitalAllocator
         self.pair_amount = 0.0
@@ -73,7 +76,7 @@ class PairBot:
             infinity_mode=config.grid.infinity_mode,
             trail_trigger_percent=config.grid.trail_trigger_percent,
         )
-        self.order_mgr = OrderManager(exchange, self.grid, risk_manager, config)
+        self.order_mgr = OrderManager(exchange, self.grid, risk_manager, config, inventory=self.inventory)
         self.current_range: RangeResult | None = None
         self.current_price: float = 0.0
         self.last_prediction: dict | None = None
@@ -565,6 +568,8 @@ class PairBot:
                 self.pair, self.grid.spacing_percent, self.current_price,
             )
 
+        inv_metrics = self.inventory.mark_to_market(self.pair, self.current_price) if self.current_price else {}
+
         return {
             "pair": self.pair,
             "price": self.current_price,
@@ -589,6 +594,7 @@ class PairBot:
                 "rebalance_needed": alloc.rebalance_needed if alloc else False,
             },
             "fee_metrics": fee_metrics,
+            "inventory": inv_metrics,
             **self.tracker.get_summary(self.pair),
         }
 
@@ -611,6 +617,7 @@ class MultiPairBot:
         self.optimizer = SelfOptimizer(self.tracker)
         self.trailing_tp = TrailingTakeProfit()
         self.fee_engine = FeeEngine()
+        self.inventory = InventoryTracker()
         self.sentiment = NewsSentiment(
             api_key=config.sentiment.api_key,
             provider=config.sentiment.provider,
@@ -779,12 +786,18 @@ class MultiPairBot:
                 ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
             bot = PairBot(pair, self.config, self.exchange, self.risk,
                           self.tracker, self.telegram, ml, self.cloud,
-                          fee_engine=self.fee_engine)
+                          fee_engine=self.fee_engine, inventory=self.inventory)
             self.pair_bots[pair] = bot
 
         saved_state = await self.cloud.load_state() if self.cloud.connected else None
         if saved_state:
             self.trailing_tp.deserialize(saved_state.get("trailing_tps", []))
+            inv_data = saved_state.get("inventory")
+            if inv_data:
+                self.inventory = InventoryTracker.deserialize(inv_data)
+                for bot in self.pair_bots.values():
+                    bot.inventory = self.inventory
+                    bot.order_mgr.inventory = self.inventory
 
         pair_count = len(self.pair_bots)
         for pair, bot in self.pair_bots.items():
@@ -1220,6 +1233,7 @@ class MultiPairBot:
                 "grid_state": grid_state,
                 "trailing_tps": self.trailing_tp.serialize(),
                 "last_prices": last_prices,
+                "inventory": self.inventory.serialize(),
             })
         except Exception as e:
             logger.debug("State persist failed: %s", e)
@@ -1568,6 +1582,8 @@ class MultiPairBot:
                     pair, bot.grid.spacing_percent, bot.current_price,
                 ) if bot.current_price else {}
 
+                inv_snap = self.inventory.mark_to_market(pair, bot.current_price) if bot.current_price else {}
+
                 asyncio.create_task(self.cloud.log_event(
                     "snapshot",
                     f"{pair} — {active}/{total_levels} Grid, PnL {summary['realized_pnl']:.4f}",
@@ -1599,6 +1615,7 @@ class MultiPairBot:
                         "slippage_cost": summary.get("slippage_cost", 0),
                         "maker_fill_pct": summary.get("maker_fill_pct", 100),
                         **fee_info,
+                        **inv_snap,
                     },
                 ))
         except Exception as e:
@@ -1949,7 +1966,7 @@ class MultiPairBot:
                     ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
                 bot = PairBot(pair, self.config, self.exchange, self.risk,
                               self.tracker, self.telegram, ml, self.cloud,
-                              fee_engine=self.fee_engine)
+                              fee_engine=self.fee_engine, inventory=self.inventory)
                 self.pair_bots[pair] = bot
                 try:
                     await bot.initialize(self.allocator, len(self.pair_bots), None)

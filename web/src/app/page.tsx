@@ -38,6 +38,12 @@ interface PairMetrics {
   fee_metrics?: FeeMetrics;
   avg_slippage_bps?: number; max_slippage_bps?: number;
   slippage_cost?: number; maker_fill_pct?: number;
+  inventory?: {
+    base_inventory: number; avg_cost_basis: number; total_cost: number;
+    market_value: number; unrealized_pnl: number; realized_pnl: number;
+    total_pnl: number; total_fees: number;
+    trade_count: number; buy_count: number; sell_count: number;
+  };
   open_orders?: OpenOrder[];
 }
 interface Trade {
@@ -528,6 +534,27 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
           {m.annualized_return_pct !== undefined && <span>Rendite: <strong className="text-[var(--text-tertiary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
           {m.fees_paid !== undefined && <span>Gebuehren: <strong className="text-[var(--text-tertiary)]">{fmt(m.fees_paid)}</strong></span>}
           <span>Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity)}</strong></span>
+        </div>
+      )}
+      {m.inventory && m.inventory.base_inventory > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pb-2 border-b border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)] mb-2">
+          <span>
+            Avg. Entry: <strong className="text-[var(--text-secondary)] font-mono">{fmt(m.inventory.avg_cost_basis)}</strong>
+          </span>
+          <span>
+            Unrealized:{" "}
+            <strong className={m.inventory.unrealized_pnl >= 0 ? "text-[var(--up)]" : "text-[var(--down)]"} style={{ fontFamily: "JetBrains Mono, monospace" }}>
+              {m.inventory.unrealized_pnl >= 0 ? "+" : ""}{fmt(m.inventory.unrealized_pnl, 4)}
+            </strong>
+          </span>
+          <span>
+            Cost: <strong className="text-[var(--text-tertiary)] font-mono">{fmt(m.inventory.total_cost)}</strong>
+            {" → "}
+            <strong className="text-[var(--text-secondary)] font-mono">{fmt(m.inventory.market_value)}</strong>
+          </span>
+          <span>
+            Pos: <strong className="text-[var(--text-tertiary)] font-mono">{m.inventory.base_inventory.toFixed(6)}</strong>
+          </span>
         </div>
       )}
       {m.fee_metrics && !m.fee_metrics.spacing_is_profitable && (
