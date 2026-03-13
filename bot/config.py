@@ -112,6 +112,15 @@ class SentimentConfig:
 
 
 @dataclass
+class RLConfig:
+    """Reinforcement Learning (Contextual Bandit) configuration."""
+    enabled: bool = False
+    warmup_episodes: int = 20
+    eval_interval_hours: int = 6
+    reward_lookback_hours: int = 24
+
+
+@dataclass
 class PiConfig:
     """Raspberry Pi specific resource limits."""
     enabled: bool = False
@@ -145,6 +154,7 @@ class BotConfig:
     pi: PiConfig = field(default_factory=PiConfig)
     cloud: CloudConfig = field(default_factory=CloudConfig)
     sentiment: SentimentConfig = field(default_factory=SentimentConfig)
+    rl: RLConfig = field(default_factory=RLConfig)
     logging_cfg: LoggingConfig = field(default_factory=LoggingConfig)
     db_path: str = "data/richbot.db"
     log_level: str = "INFO"
@@ -193,6 +203,8 @@ class BotConfig:
             cfg.cloud = CloudConfig(**data["cloud"])
         if "sentiment" in data:
             cfg.sentiment = SentimentConfig(**data["sentiment"])
+        if "rl" in data:
+            cfg.rl = RLConfig(**data["rl"])
         return cfg
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,6 +231,7 @@ def _apply_env_overrides(cfg: BotConfig) -> BotConfig:
     env_map["SENTIMENT_API_KEY"] = lambda v: setattr(cfg.sentiment, "api_key", v)
     env_map["SENTIMENT_PROVIDER"] = lambda v: setattr(cfg.sentiment, "provider", v)
     env_map["SENTIMENT_ENABLED"] = lambda v: setattr(cfg.sentiment, "enabled", v.lower() == "true")
+    env_map["RL_ENABLED"] = lambda v: setattr(cfg.rl, "enabled", v.lower() == "true")
     for env_key, setter in env_map.items():
         val = os.environ.get(env_key)
         if val:

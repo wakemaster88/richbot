@@ -27,6 +27,7 @@ from bot.risk_manager import RiskManager
 from bot.self_optimizer import SelfOptimizer
 from bot.telegram_bot import TelegramNotifier
 from bot.news_sentiment import NewsSentiment
+from bot.rl_optimizer import GridBandit, compute_reward
 from bot.trailing_tp import TrailingTakeProfit
 
 try:
@@ -556,6 +557,7 @@ class MultiPairBot:
             fetch_interval=config.sentiment.fetch_interval,
             cache_validity=config.sentiment.cache_validity,
         )
+        self.rl = GridBandit()
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
         self._running = False
@@ -1196,16 +1198,21 @@ class MultiPairBot:
         self._mon_state["start"] = self._mon_state.get("start", now)
 
     async def _optimization_loop(self):
-        """Self-optimize every 6 hours based on recent performance."""
-        await asyncio.sleep(300)  # let the bot settle before first optimization
+        """Self-optimize every 6 hours based on recent performance.
+
+        Heuristic SelfOptimizer remains the primary layer.
+        When RL is enabled, GridBandit proposes a second set of deltas
+        that are merged with the heuristic — agreement amplifies,
+        contradiction defers to the heuristic until warmup is complete.
+        """
+        await asyncio.sleep(300)
         while self._running:
-            await asyncio.sleep(6 * 3600)
+            await asyncio.sleep(self.config.rl.eval_interval_hours * 3600)
             try:
                 pairs = list(self.pair_bots.keys())
                 if not pairs:
                     continue
 
-                # Per-pair parameter tuning
                 for pair, bot in self.pair_bots.items():
                     window = self.optimizer.evaluate(pair)
                     if window.trade_count < 3:
@@ -1213,26 +1220,74 @@ class MultiPairBot:
                                     pair, window.trade_count)
                         continue
 
+                    rp = bot.regime.get_grid_params()
                     current_params = {
-                        "spacing_mult": bot.regime.get_grid_params().spacing_mult,
-                        "size_mult": bot.regime.get_grid_params().size_mult,
+                        "spacing_mult": rp.spacing_mult,
+                        "size_mult": rp.size_mult,
                         "range_multiplier": self.config.grid.range_multiplier,
+                        "min_distance_pct": rp.min_distance_pct,
                     }
-                    adj = self.optimizer.suggest_adjustments(current_params, window)
 
-                    if adj:
-                        if "range_multiplier" in adj:
-                            self.config.grid.range_multiplier = adj["range_multiplier"]
+                    heuristic_adj = self.optimizer.suggest_adjustments(current_params, window)
+
+                    merged_adj = dict(heuristic_adj)
+
+                    rl_action: dict | None = None
+                    if self.config.rl.enabled:
+                        reward = compute_reward(
+                            sharpe=window.sharpe_ratio,
+                            win_rate=window.win_rate,
+                            pnl_24h=window.total_pnl,
+                            drawdown_pct=window.max_drawdown_pct,
+                        )
+                        self.rl.record_reward(reward)
+
+                        regime_dict = bot.regime.to_dict()
+                        perf_summary = {
+                            "win_rate": window.win_rate,
+                            "sharpe": window.sharpe_ratio,
+                            "max_drawdown_pct": window.max_drawdown_pct,
+                            "fill_rate": window.grid_fill_rate,
+                        }
+                        sent_score = regime_dict.get("sentiment_score", 0.0)
+                        state = self.rl.get_state(regime_dict, perf_summary, sent_score)
+                        rl_action = self.rl.choose_action(state)
+
+                        merged_adj = self._merge_rl_heuristic(
+                            current_params, heuristic_adj, rl_action,
+                        )
+
+                        if self.cloud.connected:
+                            asyncio.create_task(self.cloud.log_event(
+                                "rl_optimization",
+                                f"RL Episode #{self.rl._episode_count}: "
+                                f"reward={reward:.3f}, action={rl_action['action_idx']}",
+                                {
+                                    "state": state.tolist(),
+                                    "action": rl_action,
+                                    "reward": round(reward, 4),
+                                    "was_exploration": rl_action["was_exploration"],
+                                    "episode": self.rl._episode_count,
+                                    "heuristic_adj": heuristic_adj,
+                                    "merged_adj": merged_adj,
+                                    "exploration_rate": round(self.rl._exploration, 4),
+                                },
+                            ))
+
+                    if merged_adj:
+                        if "range_multiplier" in merged_adj:
+                            self.config.grid.range_multiplier = merged_adj["range_multiplier"]
                         logger.info(
-                            "Optimizer: %s — WR=%.0f%%, Sharpe=%.2f, DD=%.1f%%, Anpassungen: %s",
+                            "Optimizer: %s — WR=%.0f%%, Sharpe=%.2f, DD=%.1f%%, Adj: %s%s",
                             pair, window.win_rate * 100, window.sharpe_ratio,
-                            window.max_drawdown_pct, adj,
+                            window.max_drawdown_pct, merged_adj,
+                            " [RL]" if rl_action else "",
                         )
                         if self.cloud.connected:
                             asyncio.create_task(self.cloud.log_event(
                                 "optimization",
-                                f"Self-Tuning {pair}: {', '.join(f'{k}={v}' for k, v in adj.items())}",
-                                {"pair": pair, "adjustments": adj,
+                                f"Self-Tuning {pair}: {', '.join(f'{k}={v}' for k, v in merged_adj.items())}",
+                                {"pair": pair, "adjustments": merged_adj,
                                  "win_rate": window.win_rate,
                                  "sharpe": window.sharpe_ratio,
                                  "drawdown": window.max_drawdown_pct,
@@ -1243,7 +1298,6 @@ class MultiPairBot:
                         logger.info("Optimizer: %s — keine Anpassung noetig (WR=%.0f%%, Sharpe=%.2f)",
                                     pair, window.win_rate * 100, window.sharpe_ratio)
 
-                # Multi-pair capital allocation scoring
                 if len(pairs) >= 2:
                     scores = self.optimizer.score_pairs(pairs)
                     for s in scores:
@@ -1263,6 +1317,59 @@ class MultiPairBot:
 
             except Exception as e:
                 logger.warning("Optimization loop error: %s", e)
+
+    def _merge_rl_heuristic(
+        self, current: dict, heuristic: dict, rl_action: dict,
+    ) -> dict:
+        """Combine heuristic adjustments with RL deltas.
+
+        Before warmup: heuristic wins on conflict, RL only reinforces.
+        After warmup:  RL gets 70% weight, heuristic 30%.
+        """
+        from bot.rl_optimizer import GridBandit, SAFETY_BOUNDS
+
+        past_warmup = self.rl._episode_count >= self.config.rl.warmup_episodes
+        rl_w = 0.70 if past_warmup else 0.0
+        h_w = 1.0 - rl_w
+
+        rl_params = GridBandit.apply_deltas(current, rl_action)
+
+        merged: dict[str, float] = {}
+        for key in ("spacing_mult", "size_mult", "range_multiplier", "min_distance_pct"):
+            h_val = heuristic.get(key)
+            r_val = rl_params.get(key, current.get(key))
+            c_val = current.get(key, r_val)
+
+            if h_val is None and r_val == c_val:
+                continue
+
+            h_target = h_val if h_val is not None else c_val
+            r_target = r_val if r_val is not None else c_val
+
+            h_dir = h_target - c_val
+            r_dir = r_target - c_val
+
+            if not past_warmup:
+                if h_val is not None:
+                    # RL reinforces heuristic direction only
+                    if h_dir * r_dir > 0:
+                        final = c_val + h_dir + r_dir * 0.3
+                    else:
+                        final = h_target
+                elif abs(r_dir) > 1e-9:
+                    final = c_val + r_dir * 0.3
+                else:
+                    continue
+            else:
+                final = c_val + h_w * h_dir + rl_w * r_dir
+
+            lo, hi = SAFETY_BOUNDS.get(key, (0.0, 10.0))
+            final = max(lo, min(hi, final))
+
+            if abs(final - c_val) > 1e-6:
+                merged[key] = round(final, 4)
+
+        return merged
 
     async def _log_analytics_snapshot(self):
         """Log comprehensive analytics every ~5 minutes for dashboard analysis."""
@@ -1482,7 +1589,7 @@ class MultiPairBot:
         while self._running:
             try:
                 signal = await self.sentiment.get_signal(self.config.pairs)
-                for bot in self.bots.values():
+                for bot in self.pair_bots.values():
                     bot.regime.set_sentiment(signal.score, signal.confidence)
                 if abs(signal.score) > 0.5:
                     asyncio.create_task(self.cloud.log_event(
@@ -1781,6 +1888,20 @@ class MultiPairBot:
             except Exception as e:
                 return {"error": str(e)}
 
+        def cmd_reset_rl(payload):
+            import numpy as _np
+            self.rl.W = _np.zeros_like(self.rl.W)
+            self.rl._episode_count = 0
+            self.rl._exploration = 0.15
+            self.rl._history.clear()
+            self.rl._pending = None
+            self.rl._save()
+            logger.info("RL-Weights zurueckgesetzt")
+            return {"status": "rl_reset", "episodes": 0}
+
+        def cmd_rl_stats(payload):
+            return self.rl.get_stats()
+
         self.cloud.on_command("stop", cmd_stop)
         self.cloud.on_command("resume", cmd_resume)
         self.cloud.on_command("pause", cmd_pause)
@@ -1789,3 +1910,5 @@ class MultiPairBot:
         self.cloud.on_command("update_config", cmd_update_config)
         self.cloud.on_command("update_software", cmd_update_software)
         self.cloud.on_command("fetch_logs", cmd_fetch_logs)
+        self.cloud.on_command("reset_rl", cmd_reset_rl)
+        self.cloud.on_command("rl_stats", cmd_rl_stats)
