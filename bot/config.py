@@ -101,14 +101,30 @@ class CloudConfig:
 
 
 @dataclass
+class AlertConfig:
+    """Alert pipeline: Telegram + WebPush, dedup, quiet hours."""
+    webhook_url: str = ""
+    webhook_secret: str = ""
+    quiet_start_hour: int = 23
+    quiet_end_hour: int = 7
+    severities: tuple[str, ...] = ("info", "warn", "critical")
+    alert_on_trade: bool = True
+    alert_on_drawdown: bool = True
+    alert_on_circuit_breaker: bool = True
+    alert_on_regime_change: bool = True
+
+
+@dataclass
 class SentimentConfig:
-    """News-sentiment analysis configuration."""
+    """News + social sentiment analysis configuration."""
     enabled: bool = False
     provider: str = "grok"
     api_key: str = ""
     fetch_interval: int = 900
     cache_validity: int = 1800
     weight: float = 0.30
+    use_social_aggregation: bool = True
+    twitter_proxy_url: str = ""
 
 
 @dataclass
@@ -150,6 +166,7 @@ class BotConfig:
     ml: MLConfig = field(default_factory=MLConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    alerts: AlertConfig = field(default_factory=AlertConfig)
     websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
     pi: PiConfig = field(default_factory=PiConfig)
     cloud: CloudConfig = field(default_factory=CloudConfig)
@@ -183,6 +200,19 @@ class BotConfig:
             cfg.optimizer = OptimizerConfig(**data["optimizer"])
         if "telegram" in data:
             cfg.telegram = TelegramConfig(**data["telegram"])
+        if "alerts" in data:
+            ad = data["alerts"]
+            cfg.alerts = AlertConfig(
+                webhook_url=ad.get("webhook_url", ""),
+                webhook_secret=ad.get("webhook_secret", ""),
+                quiet_start_hour=int(ad.get("quiet_start_hour", 23)),
+                quiet_end_hour=int(ad.get("quiet_end_hour", 7)),
+                severities=tuple(ad.get("severities", ["info", "warn", "critical"])),
+                alert_on_trade=ad.get("alert_on_trade", True),
+                alert_on_drawdown=ad.get("alert_on_drawdown", True),
+                alert_on_circuit_breaker=ad.get("alert_on_circuit_breaker", True),
+                alert_on_regime_change=ad.get("alert_on_regime_change", True),
+            )
         if "websocket" in data:
             cfg.websocket = WebSocketConfig(**data["websocket"])
         if "database" in data:

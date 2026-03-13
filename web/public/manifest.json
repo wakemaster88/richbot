@@ -1,0 +1,18 @@
+{
+  "name": "RichBot Dashboard",
+  "short_name": "RichBot",
+  "description": "Grid-Trading Bot — Fernsteuerung & Monitoring",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08090e",
+  "theme_color": "#6366f1",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

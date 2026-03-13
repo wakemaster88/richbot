@@ -15,12 +15,13 @@ export async function POST(request: NextRequest) {
     const pair = body.pair || "BTC/USDC";
     const days = Math.min(Math.max(parseInt(body.days) || 30, 1), 365);
     const capital = Math.min(Math.max(parseFloat(body.capital) || 200, 10), 100000);
+    const param_overrides = body.param_overrides ?? null;
 
     const command = await prisma.command.create({
       data: {
         botId: BOT_ID,
         type: "backtest",
-        payload: { pair, days, capital },
+        payload: { pair, days, capital, ...(param_overrides && { param_overrides }) },
         status: "pending",
       },
     });

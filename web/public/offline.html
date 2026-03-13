@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RichBot — Offline</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #08090e;
+      color: #f1f3f9;
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 1rem;
+      text-align: center;
+    }
+    .icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.7; }
+    h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+    p { color: #5c6182; font-size: 0.9rem; margin: 0; }
+    .reload {
+      margin-top: 1.5rem;
+      padding: 0.75rem 1.5rem;
+      background: #6366f1;
+      color: white;
+      border: none;
+      border-radius: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="icon">📡</div>
+  <h1>Keine Internetverbindung</h1>
+  <p>Der Bot läuft weiter. Sobald du wieder online bist, kannst du die Seite neu laden.</p>
+  <button class="reload" onclick="location.reload()">Neu laden</button>
+</body>
+</html>

@@ -76,6 +76,21 @@ input[type="number"]::-webkit-outer-spin-button { opacity: 0; }
     border: 1px solid var(--border-subtle);
     border-radius: 12px;
   }
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (max-width: 767px) {
+  .swipe-nav {
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+  }
+  .swipe-nav > * {
+    scroll-snap-align: start;
+  }
 }
 
 @keyframes pulse-live {

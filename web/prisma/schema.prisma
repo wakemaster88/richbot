@@ -114,3 +114,13 @@ model BotEvent {
   @@index([botId, category, timestamp(sort: Desc)])
   @@map("bot_events")
 }
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  endpoint  String   @unique
+  keys      Json
+  userId    String?  @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("push_subscriptions")
+}

@@ -50,20 +50,27 @@ class SentimentSignal:
     reason: str = ""
     source: str = "keyword"
     timestamp: float = 0.0
+    breakdown: dict | None = None
 
 
 class NewsSentiment:
-    """Fetches crypto news and classifies market sentiment."""
+    """Fetches crypto news and classifies market sentiment.
+    Optional: aggregates with Reddit, Fear&Greed, Twitter.
+    """
 
     def __init__(self, api_key: str = "", provider: str = "grok",
-                 fetch_interval: int = 900, cache_validity: int = 1800):
+                 fetch_interval: int = 900, cache_validity: int = 1800,
+                 use_social_aggregation: bool = True, twitter_proxy: str = ""):
         self._provider = provider if api_key else "local"
         self._api_key = api_key
         self._fetch_interval = fetch_interval
         self._cache_validity = cache_validity
+        self._use_social = use_social_aggregation
+        self._twitter_proxy = twitter_proxy
         self._last_signal: SentimentSignal | None = None
         self._last_fetch: float = 0.0
         self._rate_limited_until: float = 0.0
+        self._aggregator = None
 
     # ── public API ────────────────────────────────────────────────
 
@@ -72,6 +79,30 @@ class NewsSentiment:
 
         if self._last_signal and now - self._last_fetch < self._fetch_interval:
             return self._last_signal
+
+        if self._use_social:
+            try:
+                from bot.social_sentiment import SentimentAggregator
+                if self._aggregator is None:
+                    self._aggregator = SentimentAggregator(
+                        self._get_news_signal_for_aggregator,
+                        api_key=self._api_key,
+                        twitter_proxy=self._twitter_proxy,
+                    )
+                agg = await self._aggregator.get_aggregated(pairs)
+                self._last_signal = SentimentSignal(
+                    score=agg.score,
+                    confidence=agg.confidence,
+                    headlines=agg.headlines,
+                    reason=agg.reason,
+                    source="aggregated",
+                    timestamp=agg.timestamp,
+                    breakdown=self._aggregator.get_breakdown(),
+                )
+                self._last_fetch = now
+                return self._last_signal
+            except Exception as e:
+                logger.debug("Social aggregation failed, fallback to news only: %s", e)
 
         headlines = await self.fetch_headlines(pairs)
         if not headlines:
@@ -89,6 +120,23 @@ class NewsSentiment:
         self._last_signal = signal
         self._last_fetch = now
         return signal
+
+    async def _get_news_signal_for_aggregator(self, pairs: list[str]) -> SentimentSignal | None:
+        """News-only signal for aggregator. Skips aggregator recursion."""
+        headlines = await self.fetch_headlines(pairs)
+        if not headlines:
+            return None
+        if self._api_key and self._provider != "local" and _time.time() > self._rate_limited_until:
+            signal = await self._classify_with_llm(headlines)
+        else:
+            signal = self._keyword_fallback(headlines)
+        return signal
+
+    def get_breakdown(self) -> dict | None:
+        """Return last sentiment breakdown for dashboard."""
+        if self._aggregator:
+            return self._aggregator.get_breakdown()
+        return None
 
     # ── headline fetching ─────────────────────────────────────────
 

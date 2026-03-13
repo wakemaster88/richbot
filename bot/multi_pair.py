@@ -34,6 +34,7 @@ from bot.self_optimizer import SelfOptimizer
 from bot.spread_monitor import SpreadMonitor
 from bot.walk_forward import WalkForward
 from bot.telegram_bot import TelegramNotifier
+from bot.alerting import AlertManager, TelegramChannel, WebPushChannel
 from bot.news_sentiment import NewsSentiment
 from bot.rl_optimizer import GridBandit, compute_reward
 from bot.trailing_tp import TrailingTakeProfit
@@ -56,13 +57,15 @@ class PairBot:
                  fee_engine: FeeEngine | None = None,
                  inventory: InventoryTracker | None = None,
                  inventory_skew: InventorySkew | None = None,
-                 circuit_breaker: CircuitBreaker | None = None):
+                 circuit_breaker: CircuitBreaker | None = None,
+                 alert_manager: AlertManager | None = None):
         self.pair = pair
         self.config = config
         self.exchange = exchange
         self.risk = risk_manager
         self.tracker = tracker
         self.telegram = telegram
+        self.alert_manager = alert_manager
         self.ml = ml_predictor
         self.cloud = cloud
         self.fee_engine = fee_engine
@@ -129,12 +132,18 @@ class PairBot:
         self.tracker.record_trade(trade)
 
         slip_bps = managed_order.slippage * 10_000
-        asyncio.create_task(
-            self.telegram.alert_fill(
+        if self.alert_manager:
+            asyncio.create_task(self.alert_manager.alert_trade(
                 self.pair, managed_order.side, managed_order.fill_price,
                 fill_qty, managed_order.pnl,
+            ))
+        else:
+            asyncio.create_task(
+                self.telegram.alert_fill(
+                    self.pair, managed_order.side, managed_order.fill_price,
+                    fill_qty, managed_order.pnl,
+                )
             )
-        )
 
         if self.cloud and self.cloud.connected:
             asyncio.create_task(self.cloud.sync_trade(trade))
@@ -537,12 +546,23 @@ class PairBot:
             old_cb = self.cb.get_level(self.pair)
             new_cb = self.cb.update_equity(self.pair, usdt)
 
+            cb_status = self.cb.get_pair_status(self.pair)
+            dd_pct = cb_status["drawdown_pct"]
+            if dd_pct >= 3 and self.alert_manager:
+                asyncio.create_task(self.alert_manager.alert_drawdown(self.pair, dd_pct, usdt))
             if new_cb > old_cb:
                 cb_name = {CBLevel.YELLOW: "YELLOW", CBLevel.ORANGE: "ORANGE", CBLevel.RED: "RED"}.get(new_cb, "?")
-                cb_status = self.cb.get_pair_status(self.pair)
                 if new_cb == CBLevel.RED:
-                    await self.telegram.alert_drawdown_stop(self.pair, cb_status["drawdown_pct"], usdt)
+                    if not self.alert_manager:
+                        await self.telegram.alert_drawdown_stop(
+                            self.pair, cb_status["drawdown_pct"], usdt
+                        )
                     await self.order_mgr.cancel_all(self.pair)
+                if self.alert_manager:
+                    cb_name = {CBLevel.YELLOW: "YELLOW", CBLevel.ORANGE: "ORANGE", CBLevel.RED: "RED"}.get(new_cb, "?")
+                    await self.alert_manager.alert_circuit_breaker(
+                        self.pair, cb_name or "YELLOW", cb_status["drawdown_pct"]
+                    )
                 if self.cloud and self.cloud.connected:
                     level_str = "critical" if new_cb == CBLevel.RED else "warn"
                     asyncio.create_task(self.cloud.log_event(
@@ -687,6 +707,8 @@ class MultiPairBot:
             provider=config.sentiment.provider,
             fetch_interval=config.sentiment.fetch_interval,
             cache_validity=config.sentiment.cache_validity,
+            use_social_aggregation=getattr(config.sentiment, "use_social_aggregation", True),
+            twitter_proxy=getattr(config.sentiment, "twitter_proxy_url", "") or "",
         )
         self.rl = GridBandit()
         self.ws: WebSocketClient | None = None
@@ -842,6 +864,28 @@ class MultiPairBot:
         except Exception as e:
             logger.warning("Fee-Engine Init fehlgeschlagen: %s — nutze Defaults", e)
 
+        self.alert_manager = None
+        if hasattr(self.config, "alerts") and self.config.alerts:
+            ac = self.config.alerts
+            from bot.config import AlertConfig
+            alert_cfg = AlertConfig(
+                webhook_url=ac.webhook_url or "",
+                webhook_secret=ac.webhook_secret or "",
+                quiet_start_hour=ac.quiet_start_hour,
+                quiet_end_hour=ac.quiet_end_hour,
+                severities=ac.severities,
+                alert_on_trade=ac.alert_on_trade,
+                alert_on_drawdown=ac.alert_on_drawdown,
+                alert_on_circuit_breaker=ac.alert_on_circuit_breaker,
+                alert_on_regime_change=ac.alert_on_regime_change,
+            )
+            self.alert_manager = AlertManager(alert_cfg)
+            self.alert_manager.add_channel(TelegramChannel(self.telegram))
+            if alert_cfg.webhook_url:
+                self.alert_manager.add_channel(WebPushChannel(
+                    alert_cfg.webhook_url, alert_cfg.webhook_secret
+                ))
+
         for pair in self.config.pairs:
             ml = None
             if self.config.ml.enabled and not self.config.is_pi:
@@ -852,7 +896,7 @@ class MultiPairBot:
                           self.tracker, self.telegram, ml, self.cloud,
                           fee_engine=self.fee_engine, inventory=self.inventory,
                           inventory_skew=self.inv_skew,
-                          circuit_breaker=self.cb)
+                          circuit_breaker=self.cb, alert_manager=self.alert_manager)
             self.pair_bots[pair] = bot
 
         saved_state = await self.cloud.load_state() if self.cloud.connected else None
@@ -1101,7 +1145,12 @@ class MultiPairBot:
                 is_maker=False,
             )
             bot.tracker.record_trade(trade)
-            asyncio.create_task(bot.telegram.alert_fill(pair, counter_side, exec_price, entry.amount, pnl))
+            if bot.alert_manager:
+                asyncio.create_task(bot.alert_manager.alert_trade(
+                    pair, counter_side, exec_price, entry.amount, pnl
+                ))
+            else:
+                asyncio.create_task(bot.telegram.alert_fill(pair, counter_side, exec_price, entry.amount, pnl))
 
             if self.cloud.connected:
                 asyncio.create_task(self.cloud.sync_trade(trade))
@@ -1265,6 +1314,10 @@ class MultiPairBot:
                 new_regime = bot.regime.update(ohlcv_arr)
                 if new_regime != old_regime and self.cloud.connected:
                     rp = bot.regime.get_grid_params()
+                    if self.alert_manager:
+                        asyncio.create_task(self.alert_manager.alert_regime_change(
+                            pair, old_regime.value, new_regime.value
+                        ))
                     asyncio.create_task(self.cloud.log_event(
                         "regime",
                         f"{pair} Regime: {old_regime.value} → {new_regime.value}",
@@ -1293,12 +1346,15 @@ class MultiPairBot:
                     await self._log_analytics_snapshot()
                     await self._monitoring_checks()
 
-            if self.cloud.connected:
-                metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
-                corr_metrics = self.correlation.get_metrics()
-                if corr_metrics:
-                    metrics["__correlation__"] = corr_metrics
-                metrics["__circuit_breaker__"] = self.cb.get_metrics()
+                if self.cloud.connected:
+                    metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
+                    corr_metrics = self.correlation.get_metrics()
+                    if corr_metrics:
+                        metrics["__correlation__"] = corr_metrics
+                    metrics["__circuit_breaker__"] = self.cb.get_metrics()
+                    sent_breakdown = self.sentiment.get_breakdown()
+                    if sent_breakdown:
+                        metrics["__sentiment__"] = sent_breakdown
                 metrics["__spread__"] = self.spread_monitor.get_metrics()
                 wallet = await self._fetch_wallet()
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
@@ -2148,6 +2204,13 @@ class MultiPairBot:
         elif not api_key:
             self.sentiment._api_key = ""
             self.sentiment._provider = "local"
+        use_social = getattr(self.config.sentiment, "use_social_aggregation", True)
+        twitter_proxy = getattr(self.config.sentiment, "twitter_proxy_url", "") or ""
+        if (self.sentiment._use_social != use_social or
+                self.sentiment._twitter_proxy != twitter_proxy):
+            self.sentiment._aggregator = None
+        self.sentiment._use_social = use_social
+        self.sentiment._twitter_proxy = twitter_proxy
 
     async def _gc_loop(self):
         """Periodic garbage collection for memory-constrained Pi."""
@@ -2211,7 +2274,7 @@ class MultiPairBot:
     def _apply_config(self, payload: dict) -> list[str]:
         """Apply a config payload dict to self.config. Returns list of updated keys."""
         updated: list[str] = []
-        sections = ["grid", "atr", "risk", "ml", "telegram", "websocket", "sentiment", "rl"]
+        sections = ["grid", "atr", "risk", "ml", "telegram", "alerts", "websocket", "sentiment", "rl"]
         for section in sections:
             if section in payload:
                 target = getattr(self.config, section, None)
@@ -2219,6 +2282,8 @@ class MultiPairBot:
                     continue
                 for k, v in payload[section].items():
                     if hasattr(target, k) and k not in ("database_url", "api_key"):
+                        if k == "severities" and isinstance(v, list):
+                            v = tuple(v)
                         old_val = getattr(target, k)
                         if old_val != v:
                             setattr(target, k, v)
@@ -2270,7 +2335,7 @@ class MultiPairBot:
                               self.tracker, self.telegram, ml, self.cloud,
                               fee_engine=self.fee_engine, inventory=self.inventory,
                               inventory_skew=self.inv_skew,
-                              circuit_breaker=self.cb)
+                              circuit_breaker=self.cb, alert_manager=self.alert_manager)
                 self.pair_bots[pair] = bot
                 try:
                     await bot.initialize(self.allocator, len(self.pair_bots), None)

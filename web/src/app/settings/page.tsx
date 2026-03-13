@@ -80,6 +80,18 @@ interface BotConfigData {
     sync_trades?: boolean;
     sync_equity?: boolean;
   };
+  alerts?: {
+    webhook_url?: string;
+    webhook_secret?: string;
+    quiet_start_hour?: number;
+    quiet_end_hour?: number;
+    severities?: string[];
+    alert_on_trade?: boolean;
+    alert_on_drawdown?: boolean;
+    alert_on_circuit_breaker?: boolean;
+    alert_on_regime_change?: boolean;
+    webpush_enabled?: boolean;
+  };
 }
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -145,6 +157,18 @@ const DEFAULTS: BotConfigData = {
     command_poll_interval: 5,
     sync_trades: true,
     sync_equity: true,
+  },
+  alerts: {
+    webhook_url: "",
+    webhook_secret: "",
+    quiet_start_hour: 23,
+    quiet_end_hour: 7,
+    severities: ["info", "warn", "critical"],
+    alert_on_trade: true,
+    alert_on_drawdown: true,
+    alert_on_circuit_breaker: true,
+    alert_on_regime_change: true,
+    webpush_enabled: false,
   },
 };
 
@@ -740,6 +764,93 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
   );
 }
 
+function AlertSektion({ config, update }: { config: BotConfigData; update: (k: string, v: unknown) => void }) {
+  const [pushStatus, setPushStatus] = useState<"idle" | "requesting" | "subscribed" | "error">("idle");
+
+  const requestPush = async () => {
+    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+      setPushStatus("error");
+      return;
+    }
+    setPushStatus("requesting");
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") {
+        setPushStatus("error");
+        return;
+      }
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      const vapidResp = await fetch("/api/push/vapid");
+      const { publicKey } = vapidResp.ok ? await vapidResp.json() : {};
+      const subscription = sub || (publicKey ? await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: publicKey,
+      }) : null);
+      if (subscription) {
+        await fetch("/api/push/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(subscription.toJSON()),
+        });
+        update("alerts.webpush_enabled", true);
+        update("alerts.webhook_url", typeof window !== "undefined" ? `${window.location.origin}/api/alerts/webhook` : "");
+        setPushStatus("subscribed");
+      } else setPushStatus("error");
+    } catch {
+      setPushStatus("error");
+    }
+  };
+
+  const alerts = config.alerts ?? DEFAULTS.alerts!;
+
+  return (
+    <div className="card card-hover p-5 sm:p-6 transition-all">
+      <div className="mb-5">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-0.5">Alert-Konfiguration</h3>
+        <p className="text-[11px] text-[var(--text-tertiary)]">
+          Welche Ereignisse an Telegram und PWA Push gesendet werden. Quiet Hours: 23:00–07:00 nur Critical.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 space-y-2 mb-5">
+        <Schalter label="Alert bei Trade" value={alerts.alert_on_trade} onChange={(v) => update("alerts.alert_on_trade", v)} />
+        <Schalter label="Alert bei Drawdown &gt;3%" value={alerts.alert_on_drawdown} onChange={(v) => update("alerts.alert_on_drawdown", v)} />
+        <Schalter label="Alert bei Circuit Breaker" value={alerts.alert_on_circuit_breaker} onChange={(v) => update("alerts.alert_on_circuit_breaker", v)} />
+        <Schalter label="Alert bei Regime-Wechsel" value={alerts.alert_on_regime_change} onChange={(v) => update("alerts.alert_on_regime_change", v)} />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
+        <Zahl label="Quiet Hours Start (h)" value={alerts.quiet_start_hour} onChange={(v) => update("alerts.quiet_start_hour", v)} min={0} max={23} step={1} />
+        <Zahl label="Quiet Hours Ende (h)" value={alerts.quiet_end_hour} onChange={(v) => update("alerts.quiet_end_hour", v)} min={0} max={23} step={1} />
+      </div>
+      <div className="border-t border-[var(--border-subtle)] pt-4 space-y-3">
+        <p className="text-[10px] text-[var(--text-quaternary)] uppercase tracking-[0.1em] font-medium mb-2">Push-Benachrichtigungen (PWA)</p>
+        <p className="text-[11px] text-[var(--text-tertiary)] mb-3">Aktiviere Push, um auf dem Handy Benachrichtigungen zu erhalten.</p>
+        {!alerts.webhook_secret && (
+          <button
+            type="button"
+            onClick={() => update("alerts.webhook_secret", crypto.randomUUID?.()?.replace(/-/g, "") || "webhook-" + Math.random().toString(36).slice(2, 20))}
+            className="mr-2 px-3 py-1.5 rounded-lg text-[10px] font-semibold"
+            style={{ background: "var(--bg-secondary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+          >
+            Webhook-Secret generieren
+          </button>
+        )}
+        {alerts.webhook_secret && (
+          <p className="text-[10px] text-[var(--up)]">Webhook-Secret gesetzt — in Vercel als ALERT_WEBHOOK_SECRET eintragen</p>
+        )}
+        <button
+          onClick={requestPush}
+          disabled={pushStatus === "requesting"}
+          className="px-4 py-2.5 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40 touch-target"
+          style={{ background: "var(--accent-bg)", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 20%, transparent)" }}
+        >
+          {pushStatus === "requesting" ? "Abfrage..." : pushStatus === "subscribed" ? "Push aktiviert" : "Push-Berechtigung anfordern"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* SmartGrid functions removed — CapitalAllocator on Pi handles grid sizing autonomously */
 
 /* ---- Install Guide ---- */
@@ -1170,6 +1281,7 @@ export default function SettingsPage() {
         {/* Secrets & Telegram */}
         <SecretsSektion />
         <TelegramSektion config={config} update={update} />
+        <AlertSektion config={config} update={update} />
 
         <div className="flex items-center gap-3 pt-2">
           <div className="h-px flex-1 bg-[var(--border)]" />
