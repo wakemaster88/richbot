@@ -32,6 +32,7 @@ from bot.regime_detector import Regime, RegimeDetector
 from bot.risk_manager import RiskManager
 from bot.self_optimizer import SelfOptimizer
 from bot.spread_monitor import SpreadMonitor
+from bot.walk_forward import WalkForward
 from bot.telegram_bot import TelegramNotifier
 from bot.news_sentiment import NewsSentiment
 from bot.rl_optimizer import GridBandit, compute_reward
@@ -907,6 +908,7 @@ class MultiPairBot:
             asyncio.create_task(self._fee_refresh_loop()),
             asyncio.create_task(self._correlation_loop()),
             asyncio.create_task(self._mtf_loop()),
+            asyncio.create_task(self._walk_forward_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -935,6 +937,7 @@ class MultiPairBot:
             asyncio.create_task(self._fee_refresh_loop()),
             asyncio.create_task(self._correlation_loop()),
             asyncio.create_task(self._mtf_loop()),
+            asyncio.create_task(self._walk_forward_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -1583,6 +1586,97 @@ class MultiPairBot:
             except Exception as e:
                 logger.warning("Optimization loop error: %s", e)
             await asyncio.sleep(self.config.rl.eval_interval_hours * 3600)
+
+    async def _walk_forward_loop(self):
+        """Nightly walk-forward optimisation — runs once every 24h.
+
+        Fetches 60 days of history, runs walk-forward parameter search,
+        and applies robust parameters if they pass the overfitting check.
+        """
+        await asyncio.sleep(3600)
+        while self._running:
+            try:
+                from bot.backtest import fetch_historical_ohlcv
+                for pair in self.pair_bots:
+                    logger.info("Walk-Forward: starte fuer %s", pair)
+                    ohlcv = fetch_historical_ohlcv(pair, days=60, interval="1h")
+                    if len(ohlcv) < 800:
+                        logger.info("Walk-Forward: zu wenig Daten fuer %s (%d)", pair, len(ohlcv))
+                        continue
+
+                    wf = WalkForward(
+                        config=self.config,
+                        initial_capital=200.0,
+                        train_days=30,
+                        test_days=10,
+                        step_days=5,
+                        maker_fee=0.001,
+                    )
+                    result = await wf.run(pair, ohlcv)
+
+                    logger.info(
+                        "Walk-Forward %s: robustness=%.2f, OOS-Sharpe=%.3f, "
+                        "overfitting=%.1fx, params=%s",
+                        pair, result.robustness_score, result.oos_sharpe,
+                        result.overfitting_ratio, result.best_params,
+                    )
+
+                    if self.cloud.connected:
+                        asyncio.create_task(self.cloud.log_event(
+                            "walk_forward",
+                            f"WF {pair}: robustness={result.robustness_score:.2f}, "
+                            f"OOS-Sharpe={result.oos_sharpe:.3f}",
+                            result.to_dict(),
+                        ))
+
+                    if result.overfitting_ratio > 3.0:
+                        logger.warning(
+                            "Walk-Forward %s: Overfitting erkannt (%.1fx) — Parameter NICHT uebernommen",
+                            pair, result.overfitting_ratio,
+                        )
+                        continue
+
+                    if result.robustness_score >= 0.6 and result.best_params:
+                        bp = result.best_params
+                        bot = self.pair_bots[pair]
+                        applied: list[str] = []
+
+                        if "spacing_percent" in bp:
+                            self.config.grid.spacing_percent = bp["spacing_percent"]
+                            applied.append(f"spacing={bp['spacing_percent']}")
+                        if "grid_count" in bp:
+                            self.config.grid.grid_count = bp["grid_count"]
+                            bot.grid.grid_count = bp["grid_count"]
+                            applied.append(f"grid_count={bp['grid_count']}")
+                        if "trail_trigger_percent" in bp:
+                            self.config.grid.trail_trigger_percent = bp["trail_trigger_percent"]
+                            bot.grid.trail_trigger_percent = bp["trail_trigger_percent"]
+                            applied.append(f"trail={bp['trail_trigger_percent']}")
+                        if "range_multiplier" in bp:
+                            self.config.grid.range_multiplier = bp["range_multiplier"]
+                            applied.append(f"range={bp['range_multiplier']}")
+
+                        if applied:
+                            logger.info(
+                                "Walk-Forward %s: Parameter uebernommen — %s",
+                                pair, ", ".join(applied),
+                            )
+                            if self.cloud.connected:
+                                asyncio.create_task(self.cloud.log_event(
+                                    "walk_forward_apply",
+                                    f"WF {pair}: {', '.join(applied)} (rob={result.robustness_score:.2f})",
+                                    {"pair": pair, "params": bp,
+                                     "robustness": result.robustness_score},
+                                ))
+                    else:
+                        logger.info(
+                            "Walk-Forward %s: robustness=%.2f < 0.6 — keine Aenderung",
+                            pair, result.robustness_score,
+                        )
+
+            except Exception as e:
+                logger.warning("Walk-Forward loop error: %s", e)
+            await asyncio.sleep(24 * 3600)
 
     def _merge_rl_heuristic(
         self, current: dict, heuristic: dict, rl_action: dict,
