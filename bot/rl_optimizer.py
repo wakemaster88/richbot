@@ -78,10 +78,15 @@ def compute_reward(
     )
 
 
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 class GridBandit:
     """Linear contextual bandit over a 12-dim state and 81 discrete actions."""
 
     def __init__(self, save_path: str = "data/rl_weights.json"):
+        if not os.path.isabs(save_path):
+            save_path = os.path.join(_PROJECT_DIR, save_path)
         self._save_path = save_path
         self.W: np.ndarray = np.zeros((N_ACTIONS, STATE_DIM), dtype=np.float32)
         self._pending: tuple[np.ndarray, int] | None = None
@@ -238,7 +243,7 @@ class GridBandit:
                 json.dump(payload, f)
             os.replace(tmp, self._save_path)
         except Exception:
-            logger.debug("RL-Weights konnten nicht gespeichert werden", exc_info=True)
+            logger.warning("RL-Weights konnten nicht gespeichert werden: %s", self._save_path, exc_info=True)
 
     def _load(self):
         try:
@@ -250,12 +255,12 @@ class GridBandit:
                 self._episode_count = int(data.get("episode_count", 0))
                 self._exploration = float(data.get("exploration_rate", EXPLORATION_RATE))
                 logger.info(
-                    "RL-Weights geladen: %d Episoden, ε=%.3f",
-                    self._episode_count, self._exploration,
+                    "RL-Weights geladen: %d Episoden, ε=%.3f (%s)",
+                    self._episode_count, self._exploration, self._save_path,
                 )
             else:
                 logger.warning("RL-Weights Shape mismatch, starte frisch")
         except FileNotFoundError:
-            pass
+            logger.info("RL-Weights nicht gefunden, starte frisch: %s", self._save_path)
         except Exception:
-            logger.warning("RL-Weights Ladefehler, starte frisch", exc_info=True)
+            logger.warning("RL-Weights Ladefehler, starte frisch: %s", self._save_path, exc_info=True)
