@@ -438,15 +438,22 @@ function WalletUebersicht({ wallet, targetRatio, pairStats, equity }: {
 
 // -- Pair Info Card (compact) --
 
-function PairInfoCard({ pair, m, quote = "USDC" }: { pair: string; m: PairMetrics; quote?: string }) {
+function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; m: PairMetrics; quote?: string; events?: BotEvent[] }) {
   const up = m.total_pnl >= 0;
+  const coin = pair.split("/")[0];
+  const pairEvents = events.filter(ev => {
+    const d = ev.detail as Record<string, unknown> | null;
+    if (d?.pair === pair) return true;
+    if (ev.message.includes(pair) || ev.message.includes(coin)) return true;
+    return false;
+  }).slice(0, 8);
 
   return (
-    <div className="card p-4 sm:p-5 fade-in">
+    <div className="card p-4 sm:p-5 fade-in flex flex-col h-full">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[10px]" style={{ background: up ? "var(--up-bg)" : "var(--down-bg)", color: up ? "var(--up)" : "var(--down)" }}>
-            {pair.split("/")[0]}
+            {coin}
           </div>
           <div>
             <h3 className="font-semibold text-sm leading-tight">{pair}</h3>
@@ -481,12 +488,38 @@ function PairInfoCard({ pair, m, quote = "USDC" }: { pair: string; m: PairMetric
       </div>
 
       {(m.annualized_return_pct || m.fees_paid) && (
-        <div className="flex items-center gap-3 pt-2 border-t border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)]">
+        <div className="flex items-center gap-3 pb-2 border-b border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)] mb-2">
           {m.annualized_return_pct !== undefined && <span>Rendite: <strong className="text-[var(--text-tertiary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
           {m.fees_paid !== undefined && <span>Gebuehren: <strong className="text-[var(--text-tertiary)]">{fmt(m.fees_paid)}</strong></span>}
           <span>Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity)}</strong></span>
         </div>
       )}
+
+      <div className="flex-1 min-h-0">
+        {pairEvents.length > 0 ? (
+          <div className="space-y-0 overflow-y-auto max-h-48">
+            {pairEvents.map((ev) => {
+              const col = EVT_COLORS[ev.level === "critical" ? "critical" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : ev.level === "success" ? "success" : ev.category] || "var(--text-tertiary)";
+              const icon = EVT_ICONS[ev.category] || "\u00B7";
+              const zeit = new Date(ev.timestamp).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+              return (
+                <div key={ev.id} className="flex items-start gap-1.5 text-[9px] py-1 px-1 rounded hover:bg-[var(--bg-secondary)] transition-colors">
+                  <span className="shrink-0 w-3.5 h-3.5 rounded flex items-center justify-center text-[7px] font-bold mt-px"
+                    style={{ background: `color-mix(in srgb, ${col} 15%, transparent)`, color: col }}>
+                    {icon}
+                  </span>
+                  <p className="min-w-0 flex-1 text-[var(--text-secondary)] leading-snug truncate">{ev.message}</p>
+                  <span className="shrink-0 text-[8px] text-[var(--text-quaternary)] font-mono mt-px">{zeit}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-full text-[9px] text-[var(--text-quaternary)]">
+            Keine Aktivitaet
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1787,7 +1820,7 @@ export default function Dashboard() {
               gridMeta={{ levels: m.grid_levels, configured: m.grid_configured, buyCount: m.grid_buy_count, sellCount: m.grid_sell_count, range: m.range, issue: m.grid_issue, unplaced: m.unplaced_orders }} />
           </div>
           <div className="lg:col-span-4">
-            <PairInfoCard pair={p} m={m} quote={quoteCcy} />
+            <PairInfoCard pair={p} m={m} quote={quoteCcy} events={events} />
           </div>
         </div>
       )) : (
