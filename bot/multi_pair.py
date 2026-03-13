@@ -16,6 +16,7 @@ import pandas as pd
 from bot.capital_allocator import CapitalAllocator, AllocationResult
 from bot.cloud_sync import CloudSync
 from bot.config import BotConfig
+from bot.correlation import CorrelationMonitor
 from bot.dynamic_range import compute_dynamic_range, detect_range_breakout, shift_range, RangeResult
 from bot.exchange import Exchange
 from bot.fee_engine import FeeEngine
@@ -654,6 +655,7 @@ class MultiPairBot:
         self.fee_engine = FeeEngine()
         self.inventory = InventoryTracker()
         self.inv_skew = InventorySkew()
+        self.correlation = CorrelationMonitor(config.pairs)
         self.sentiment = NewsSentiment(
             api_key=config.sentiment.api_key,
             provider=config.sentiment.provider,
@@ -877,6 +879,7 @@ class MultiPairBot:
             asyncio.create_task(self._range_refresh_loop()),
             asyncio.create_task(self._optimization_loop()),
             asyncio.create_task(self._fee_refresh_loop()),
+            asyncio.create_task(self._correlation_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -903,6 +906,7 @@ class MultiPairBot:
             asyncio.create_task(self._range_refresh_loop()),
             asyncio.create_task(self._optimization_loop()),
             asyncio.create_task(self._fee_refresh_loop()),
+            asyncio.create_task(self._correlation_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -1237,6 +1241,9 @@ class MultiPairBot:
 
             if self.cloud.connected:
                 metrics = {pair: bot.get_status() for pair, bot in self.pair_bots.items()}
+                corr_metrics = self.correlation.get_metrics()
+                if corr_metrics:
+                    metrics["__correlation__"] = corr_metrics
                 wallet = await self._fetch_wallet()
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
@@ -1656,6 +1663,7 @@ class MultiPairBot:
                         **fee_info,
                         **inv_snap,
                         "skew": skew_snap,
+                        "correlation": self.correlation.get_metrics(),
                     },
                 ))
         except Exception as e:
@@ -1750,6 +1758,14 @@ class MultiPairBot:
                     alloc.buy_budget *= rp.size_mult
                     alloc.sell_budget *= rp.size_mult
 
+                    corr_factor = self.correlation.effective_position_limit(pair, 1.0)
+                    if corr_factor < 0.99:
+                        alloc.buy_budget *= corr_factor
+                        alloc.sell_budget *= corr_factor
+                        alloc.amount_per_order *= corr_factor
+                        logger.info("%s: Korrelations-Reduktion %.0f%% auf Positionsgroesse",
+                                    pair, (1 - corr_factor) * 100)
+
                     bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                     bot.grid.spacing_percent *= rp.spacing_mult
 
@@ -1824,6 +1840,64 @@ class MultiPairBot:
                 logger.info("Fee-Engine: Gebuehren aktualisiert")
             except Exception as e:
                 logger.warning("Fee-Refresh fehlgeschlagen: %s", e)
+
+    async def _correlation_loop(self):
+        """Update cross-pair correlations every 6 hours."""
+        import numpy as _np
+        await asyncio.sleep(300)
+        while self._running:
+            try:
+                for pair, bot in self.pair_bots.items():
+                    self.correlation.add_pair(pair)
+                    ohlcv = await self.exchange.async_fetch_ohlcv(pair, timeframe="1h", limit=168)
+                    if ohlcv and len(ohlcv) > 1:
+                        closes = _np.array([c[4] for c in ohlcv], dtype=_np.float64)
+                        returns = self.correlation.returns_from_ohlcv(closes)
+                        if len(returns) > 0:
+                            self.correlation.update(pair, returns)
+
+                positions: dict[str, float] = {}
+                prices: dict[str, float] = {}
+                total_eq = 0.0
+                for pair, bot in self.pair_bots.items():
+                    inv = self.inventory.get_inventory(pair)
+                    positions[pair] = inv.base_inventory
+                    prices[pair] = bot.current_price or 0
+                    alloc = bot.last_allocation
+                    if alloc:
+                        total_eq = max(total_eq, alloc.total_equity)
+
+                result = self.correlation.compute(positions, prices, total_eq)
+
+                for w in result.high_corr_warnings:
+                    if w.get("extreme") and self.cloud.connected:
+                        asyncio.create_task(self.cloud.log_event(
+                            "risk",
+                            f"{w['pair_a']} und {w['pair_b']} korrelieren extrem ({w['correlation']:.0%}) — Diversifikation pruefen",
+                            w, level="warn",
+                        ))
+
+                if result.portfolio_var_pct > 5.0:
+                    logger.warning(
+                        "Portfolio-VaR %.1f%% ($%.2f) ueberschreitet 5%%-Schwelle",
+                        result.portfolio_var_pct, result.portfolio_var_abs,
+                    )
+                    if self.cloud.connected:
+                        asyncio.create_task(self.cloud.log_event(
+                            "risk",
+                            f"Portfolio-VaR hoch: {result.portfolio_var_pct:.1f}% (${result.portfolio_var_abs:.2f})",
+                            {"var_pct": result.portfolio_var_pct, "var_abs": result.portfolio_var_abs},
+                            level="warn",
+                        ))
+
+                logger.info(
+                    "Correlation updated: %d pairs, VaR %.2f%% ($%.2f), %d warnings",
+                    len(self.correlation.pairs), result.portfolio_var_pct,
+                    result.portfolio_var_abs, len(result.high_corr_warnings),
+                )
+            except Exception as e:
+                logger.debug("Correlation update failed: %s", e)
+            await asyncio.sleep(21600)
 
     async def _sentiment_loop(self):
         """Fetch news sentiment every 15 min and inject into RegimeDetectors.
