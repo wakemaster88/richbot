@@ -61,7 +61,38 @@ class Exchange:
     def __init__(self, config: ExchangeConfig):
         self.config = config
         self._markets: dict[str, dict] = {}
+        self._time_offset_ms: int = 0
+        self._time_offset_updated: float = 0.0
         _resolve_dns()
+        self._sync_server_time()
+
+    def _sync_server_time(self):
+        """Compute offset between local clock and Binance server clock.
+
+        This eliminates recvWindow errors caused by Pi clock drift — even
+        without NTP/chrony the bot timestamps will match Binance exactly.
+        """
+        try:
+            t_before = int(_time.time() * 1000)
+            resp = _urlopen_retry(f"{_BINANCE}/api/v3/time", timeout=5, max_retries=2)
+            t_after = int(_time.time() * 1000)
+            server_time = _json.loads(resp.read().decode())["serverTime"]
+            local_time = (t_before + t_after) // 2
+            self._time_offset_ms = server_time - local_time
+            self._time_offset_updated = _time.time()
+            if abs(self._time_offset_ms) > 500:
+                logger.warning("Uhr-Offset: %+d ms (lokal vs. Binance)", self._time_offset_ms)
+            else:
+                logger.info("Uhr-Sync OK: Offset %+d ms", self._time_offset_ms)
+        except Exception as e:
+            logger.warning("Server-Time-Sync fehlgeschlagen: %s — nutze lokale Uhr", e)
+            self._time_offset_ms = 0
+
+    def _get_timestamp(self) -> int:
+        """Return a timestamp aligned to Binance server time."""
+        if _time.time() - self._time_offset_updated > 1800:
+            self._sync_server_time()
+        return int(_time.time() * 1000) + self._time_offset_ms
 
     # ── market data ──────────────────────────────────────────────
 
@@ -147,7 +178,8 @@ class Exchange:
 
     def _signed_request(self, method: str, path: str, extra: dict | None = None) -> dict:
         params = extra or {}
-        params["timestamp"] = int(_time.time() * 1000)
+        params["timestamp"] = self._get_timestamp()
+        params["recvWindow"] = 10000
         query = urlencode(params)
         sig = hmac.new(self.config.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         url = f"{_BINANCE}{path}?{query}&signature={sig}"
@@ -161,8 +193,13 @@ class Exchange:
                 body = e.read().decode()
                 err = _json.loads(body)
                 msg = err.get("msg", body)
+                code = err.get("code", 0)
             except Exception:
                 msg = body or str(e)
+                code = 0
+            if code == -1021:
+                logger.warning("recvWindow-Fehler — Re-Sync der Uhr")
+                self._sync_server_time()
             raise Exception(f"binance {msg}") from None
 
     # ── public data (no auth) ────────────────────────────────────
