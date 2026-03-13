@@ -98,7 +98,11 @@ class CorrelationMonitor:
         return self._corr_matrix
 
     def effective_position_limit(self, pair: str, base_limit: float) -> float:
-        """Reduce position limit when highly correlated with other active pairs."""
+        """Reduce position limit when highly correlated with other active pairs.
+
+        Softened for small pair counts: with only 2 pairs the penalty is halved
+        because high crypto correlation is expected and already accepted.
+        """
         if self._corr_matrix is None or pair not in self._pairs:
             return base_limit
 
@@ -115,11 +119,13 @@ class CorrelationMonitor:
         if max_corr < HIGH_CORR_THRESHOLD:
             return base_limit
 
-        factor = 1.0 / math.sqrt(1.0 + max_corr)
+        pair_scale = min(1.0, (n - 1) / 3.0)
+        effective_corr = max_corr * pair_scale
+        factor = 1.0 / math.sqrt(1.0 + effective_corr)
         reduced = base_limit * factor
         logger.debug(
-            "Position limit %s: %.4f → %.4f (corr=%.2f, factor=%.3f)",
-            pair, base_limit, reduced, max_corr, factor,
+            "Position limit %s: %.4f → %.4f (corr=%.2f, pair_scale=%.2f, factor=%.3f)",
+            pair, base_limit, reduced, max_corr, pair_scale, factor,
         )
         return reduced
 

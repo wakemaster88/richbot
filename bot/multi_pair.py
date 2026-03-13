@@ -292,6 +292,16 @@ class PairBot:
         import math as _m
         min_amount = _m.ceil((min_notional * 1.15) / self.current_price / step_size) * step_size
 
+        base_sym = self.pair.split("/")[0]
+        exchange_base = balance.get(base_sym, {}).get("total", 0.0)
+        inv = self.inventory.get_inventory(self.pair)
+        if inv.base_inventory <= 0 and exchange_base > 0 and self.current_price > 0:
+            self.inventory.record_buy(self.pair, self.current_price, exchange_base, 0.0)
+            logger.info(
+                "%s Inventory seeded from exchange: %.8f %s @ %.2f",
+                self.pair, exchange_base, base_sym, self.current_price,
+            )
+
         alloc = allocator.allocate(
             self.pair, balance, self.current_price,
             pair_count, min_notional, step_size,
