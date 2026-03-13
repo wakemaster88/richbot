@@ -18,6 +18,7 @@ from bot.cloud_sync import CloudSync
 from bot.config import BotConfig
 from bot.dynamic_range import compute_dynamic_range, detect_range_breakout, shift_range, RangeResult
 from bot.exchange import Exchange
+from bot.fee_engine import FeeEngine
 from bot.grid_engine import GridEngine
 from bot.ml_predictor import LSTMPredictor
 from bot.order_manager import OrderManager
@@ -44,7 +45,8 @@ class PairBot:
     def __init__(self, pair: str, config: BotConfig, exchange: Exchange,
                  risk_manager: RiskManager, tracker: PerformanceTracker,
                  telegram: TelegramNotifier, ml_predictor: LSTMPredictor | None = None,
-                 cloud: CloudSync | None = None):
+                 cloud: CloudSync | None = None,
+                 fee_engine: FeeEngine | None = None):
         self.pair = pair
         self.config = config
         self.exchange = exchange
@@ -53,6 +55,7 @@ class PairBot:
         self.telegram = telegram
         self.ml = ml_predictor
         self.cloud = cloud
+        self.fee_engine = fee_engine
 
         self.pair_grid_count = 4  # will be set by CapitalAllocator
         self.pair_amount = 0.0
@@ -296,6 +299,7 @@ class PairBot:
             return
 
         rp_init = self.regime.get_grid_params()
+        self._apply_fees_to_grid()
         self.grid.calculate_grid(
             self.current_range, self.current_price, alloc.amount_per_order,
             buy_count=alloc.buy_count, sell_count=alloc.sell_count,
@@ -388,6 +392,7 @@ class PairBot:
                 new_range = shift_range(self.current_range, breakout)
                 self.current_range = new_range
                 alloc = self.last_allocation
+                self._apply_fees_to_grid()
                 self.grid.trail_grid(
                     breakout, price, new_range, self.pair_amount,
                     buy_count=self.pair_buy_count, sell_count=self.pair_sell_count,
@@ -492,6 +497,13 @@ class PairBot:
         except Exception as e:
             logger.error("Equity update failed for %s: %s", self.pair, e)
 
+    def _apply_fees_to_grid(self):
+        """Ensure the grid engine respects fee-aware minimum spacing."""
+        if self.fee_engine:
+            self.fee_engine.apply_to_grid(self.grid, self.pair)
+            fees = self.fee_engine.get_fees(self.pair)
+            self.order_mgr.FEE_RATE = max(fees.maker, fees.taker)
+
     def _entry_filter_dict(self, base_balance: float | None = None) -> dict:
         ef = self.regime.get_entry_filter()
         allow_sells = ef.allow_sells
@@ -508,6 +520,13 @@ class PairBot:
         ]
         unplaced = len(self.grid.get_levels_to_place())
         alloc = self.last_allocation
+
+        fee_metrics = {}
+        if self.fee_engine:
+            fee_metrics = self.fee_engine.get_metrics(
+                self.pair, self.grid.spacing_percent, self.current_price,
+            )
+
         return {
             "pair": self.pair,
             "price": self.current_price,
@@ -530,6 +549,7 @@ class PairBot:
                 "amount_per_order": alloc.amount_per_order if alloc else 0,
                 "rebalance_needed": alloc.rebalance_needed if alloc else False,
             },
+            "fee_metrics": fee_metrics,
             **self.tracker.get_summary(self.pair),
         }
 
@@ -551,6 +571,7 @@ class MultiPairBot:
         self.allocator = CapitalAllocator()
         self.optimizer = SelfOptimizer(self.tracker)
         self.trailing_tp = TrailingTakeProfit()
+        self.fee_engine = FeeEngine()
         self.sentiment = NewsSentiment(
             api_key=config.sentiment.api_key,
             provider=config.sentiment.provider,
@@ -704,6 +725,13 @@ class MultiPairBot:
             await self._wait_for_valid_credentials()
             return
 
+        try:
+            await asyncio.to_thread(
+                self.fee_engine.fetch_fees, self.exchange, self.config.pairs,
+            )
+        except Exception as e:
+            logger.warning("Fee-Engine Init fehlgeschlagen: %s — nutze Defaults", e)
+
         for pair in self.config.pairs:
             ml = None
             if self.config.ml.enabled and not self.config.is_pi:
@@ -711,7 +739,8 @@ class MultiPairBot:
                 pi_cfg = self.config.pi if self.config.is_pi else PiConfig()
                 ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
             bot = PairBot(pair, self.config, self.exchange, self.risk,
-                          self.tracker, self.telegram, ml, self.cloud)
+                          self.tracker, self.telegram, ml, self.cloud,
+                          fee_engine=self.fee_engine)
             self.pair_bots[pair] = bot
 
         saved_state = await self.cloud.load_state() if self.cloud.connected else None
@@ -758,6 +787,7 @@ class MultiPairBot:
             asyncio.create_task(self._daily_report_loop()),
             asyncio.create_task(self._range_refresh_loop()),
             asyncio.create_task(self._optimization_loop()),
+            asyncio.create_task(self._fee_refresh_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -783,6 +813,7 @@ class MultiPairBot:
             asyncio.create_task(self._daily_report_loop()),
             asyncio.create_task(self._range_refresh_loop()),
             asyncio.create_task(self._optimization_loop()),
+            asyncio.create_task(self._fee_refresh_loop()),
         ]
         if not self.config.is_pi:
             tasks.append(asyncio.create_task(self._ml_loop()))
@@ -833,6 +864,7 @@ class MultiPairBot:
                             )
                             bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                             rp_r = bot.regime.get_grid_params()
+                            bot._apply_fees_to_grid()
                             bot.grid.calculate_grid(
                                 new_range, price, alloc.amount_per_order,
                                 buy_count=alloc.buy_count, sell_count=alloc.sell_count,
@@ -859,8 +891,7 @@ class MultiPairBot:
         already moved 1%+ in the profitable direction (pyramid on winners).
         """
         current = bot.current_price or 0
-        fee_rate = OrderManager.FEE_RATE
-        min_profit_spacing = fee_rate * 2 * 1.5
+        min_profit_spacing = self.fee_engine.min_profitable_spacing(pair)
 
         grid_price = opposite.price
         amount = opposite.amount
@@ -1463,6 +1494,10 @@ class MultiPairBot:
                 buys = sum(1 for o in open_orders if o.side == "buy")
                 sells = active - buys
 
+                fee_info = self.fee_engine.get_metrics(
+                    pair, bot.grid.spacing_percent, bot.current_price,
+                ) if bot.current_price else {}
+
                 asyncio.create_task(self.cloud.log_event(
                     "snapshot",
                     f"{pair} — {active}/{total_levels} Grid, PnL {summary['realized_pnl']:.4f}",
@@ -1489,6 +1524,7 @@ class MultiPairBot:
                         "portfolio_total": total_usdc,
                         "balances": balances,
                         "issue": bot._grid_issue or None,
+                        **fee_info,
                     },
                 ))
         except Exception as e:
@@ -1588,6 +1624,7 @@ class MultiPairBot:
 
                     await bot.order_mgr.cancel_all(pair)
                     rp_a = bot.regime.get_grid_params()
+                    bot._apply_fees_to_grid()
                     bot.grid.calculate_grid(
                         bot.current_range, price, alloc.amount_per_order,
                         buy_count=alloc.buy_count, sell_count=alloc.sell_count,
@@ -1641,6 +1678,20 @@ class MultiPairBot:
             self.tracker.save_daily_report({"summaries": summaries})
             if self.config.is_pi:
                 self.tracker.prune_old_snapshots(keep_days=30)
+
+    async def _fee_refresh_loop(self):
+        """Re-fetch exchange fees every 24 hours (fee tiers can change)."""
+        while self._running:
+            await asyncio.sleep(86400)
+            try:
+                await asyncio.to_thread(
+                    self.fee_engine.fetch_fees, self.exchange, self.config.pairs,
+                )
+                for pair, bot in self.pair_bots.items():
+                    bot._apply_fees_to_grid()
+                logger.info("Fee-Engine: Gebuehren aktualisiert")
+            except Exception as e:
+                logger.warning("Fee-Refresh fehlgeschlagen: %s", e)
 
     async def _sentiment_loop(self):
         """Fetch news sentiment every 15 min and inject into RegimeDetectors.
@@ -1823,7 +1874,8 @@ class MultiPairBot:
                     pi_cfg = self.config.pi if self.config.is_pi else PiConfig()
                     ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
                 bot = PairBot(pair, self.config, self.exchange, self.risk,
-                              self.tracker, self.telegram, ml, self.cloud)
+                              self.tracker, self.telegram, ml, self.cloud,
+                              fee_engine=self.fee_engine)
                 self.pair_bots[pair] = bot
                 try:
                     await bot.initialize(self.allocator, len(self.pair_bots), None)
@@ -1938,6 +1990,7 @@ class MultiPairBot:
                             bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                             await bot.order_mgr.cancel_all(pair)
                             rp_c = bot.regime.get_grid_params()
+                            bot._apply_fees_to_grid()
                             bot.grid.calculate_grid(
                                 bot.current_range, bot.current_price, alloc.amount_per_order,
                                 buy_count=alloc.buy_count, sell_count=alloc.sell_count,

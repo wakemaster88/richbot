@@ -14,6 +14,11 @@ interface BotStatus {
   startedAt: string; version: string; dbConnected?: boolean;
 }
 interface OpenOrder { side: string; price: number; amount: number; id: string; }
+interface FeeMetrics {
+  maker_fee_pct: number; taker_fee_pct: number; fee_source: string;
+  min_profitable_spacing_pct: number; current_spacing_pct: number;
+  net_profit_per_trade_pct: number; spacing_is_profitable: boolean;
+}
 interface PairMetrics {
   pair: string; price: number; range: string; range_source: string;
   grid_levels: number; grid_configured?: number; grid_buy_count?: number; grid_sell_count?: number;
@@ -27,6 +32,7 @@ interface PairMetrics {
   trade_count: number; max_drawdown_pct: number; sharpe_ratio: number;
   current_equity: number; buy_count?: number; sell_count?: number;
   annualized_return_pct?: number; fees_paid?: number;
+  fee_metrics?: FeeMetrics;
   open_orders?: OpenOrder[];
 }
 interface Trade {
@@ -487,11 +493,26 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
         </div>
       </div>
 
-      {(m.annualized_return_pct || m.fees_paid) && (
-        <div className="flex items-center gap-3 pb-2 border-b border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)] mb-2">
+      {(m.annualized_return_pct || m.fees_paid || m.fee_metrics) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pb-2 border-b border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)] mb-2">
+          {m.fee_metrics && (
+            <span>
+              Netto/Trade:{" "}
+              <strong className={m.fee_metrics.net_profit_per_trade_pct > 0 ? "text-[var(--up)]" : "text-[var(--down)]"}>
+                {m.fee_metrics.net_profit_per_trade_pct > 0 ? "+" : ""}{m.fee_metrics.net_profit_per_trade_pct.toFixed(2)}%
+              </strong>
+            </span>
+          )}
           {m.annualized_return_pct !== undefined && <span>Rendite: <strong className="text-[var(--text-tertiary)]">{fmt(m.annualized_return_pct)}%</strong></span>}
           {m.fees_paid !== undefined && <span>Gebuehren: <strong className="text-[var(--text-tertiary)]">{fmt(m.fees_paid)}</strong></span>}
           <span>Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity)}</strong></span>
+        </div>
+      )}
+      {m.fee_metrics && !m.fee_metrics.spacing_is_profitable && (
+        <div className="flex items-center gap-1.5 px-2 py-1 mb-2 rounded text-[9px] font-medium"
+          style={{ background: "color-mix(in srgb, var(--down) 12%, transparent)", color: "var(--down)" }}>
+          <span>⚠</span>
+          <span>Grid-Abstand ({m.fee_metrics.current_spacing_pct.toFixed(2)}%) zu eng fuer Gebuehren (min. {m.fee_metrics.min_profitable_spacing_pct.toFixed(2)}%)</span>
         </div>
       )}
 
