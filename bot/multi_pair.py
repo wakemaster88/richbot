@@ -1499,6 +1499,7 @@ class MultiPairBot:
                             win_rate=window.win_rate,
                             pnl_24h=window.total_pnl,
                             drawdown_pct=window.max_drawdown_pct,
+                            trade_count=window.trade_count,
                         )
                         self.rl.record_reward(reward)
 
@@ -1510,7 +1511,16 @@ class MultiPairBot:
                             "fill_rate": window.grid_fill_rate,
                         }
                         sent_score = regime_dict.get("sentiment_score", 0.0)
-                        state = self.rl.get_state(regime_dict, perf_summary, sent_score)
+                        spread_bps = self.spread_monitor.current_spread_bps(pair)
+                        mtf_align = regime_dict.get("mtf_alignment", 0.0)
+                        skew_data = self.inv_skew.get_metrics(pair)
+                        inv_skew_val = skew_data.get("skew_factor", 0.0) if skew_data else 0.0
+                        state = self.rl.get_state(
+                            regime_dict, perf_summary, sent_score,
+                            spread_bps=spread_bps,
+                            mtf_alignment=mtf_align,
+                            inventory_skew=inv_skew_val,
+                        )
                         rl_action = self.rl.choose_action(state)
 
                         merged_adj = self._merge_rl_heuristic(
@@ -2433,13 +2443,15 @@ class MultiPairBot:
 
         def cmd_reset_rl(payload):
             import numpy as _np
-            self.rl.W = _np.zeros_like(self.rl.W)
+            from bot.rl_optimizer import N_ACTIONS, STATE_DIM, EXPLORATION_RATE, ReplayBuffer
+            self.rl.W = _np.zeros((N_ACTIONS, STATE_DIM), dtype=_np.float32)
             self.rl._episode_count = 0
-            self.rl._exploration = 0.15
+            self.rl._exploration = EXPLORATION_RATE
             self.rl._history.clear()
             self.rl._pending = None
+            self.rl._replay = ReplayBuffer()
             self.rl._save()
-            logger.info("RL-Weights zurueckgesetzt")
+            logger.info("RL V2 zurueckgesetzt")
             return {"status": "rl_reset", "episodes": 0}
 
         def cmd_rl_stats(payload):
