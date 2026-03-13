@@ -20,7 +20,7 @@ interface PairMetrics {
   active_orders: number; filled_orders: number;
   unplaced_orders?: number; grid_issue?: string;
   allocation?: { equity: number; reserve: number; amount_per_order: number; rebalance_needed: boolean };
-  regime?: { regime: string; rsi: number; adx: number; boll_width: number; avg_boll_width: number };
+  regime?: { regime: string; rsi: number; adx: number; boll_width: number; avg_boll_width: number; sentiment_score?: number; sentiment_confidence?: number };
   trailing_tp?: { pair: string; side: string; entry_price: number; amount: number; highest: number; lowest: number; age_sec: number }[];
   trailing_tp_active?: boolean;
   total_pnl: number; realized_pnl: number; unrealized_pnl: number;
@@ -229,10 +229,16 @@ function PortfolioHero({ walletTotal, totalPnl, trades, quoteCcy, pairs }: {
           {pairs.map(([p, m]) => {
             const regimeKey = m.regime?.regime || "ranging";
             const rs = REGIME_STYLE[regimeKey] || REGIME_STYLE.ranging;
+            const ss = m.regime?.sentiment_score ?? 0;
+            const sc = m.regime?.sentiment_confidence ?? 0;
+            const sIcon = ss > 0.3 ? "\u25B2" : ss < -0.3 ? "\u25BC" : "";
+            const sCol = ss > 0.3 ? "var(--up)" : "var(--down)";
             return (
               <span key={p} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[9px] font-bold"
-                style={{ background: rs.bg, color: rs.color }}>
+                style={{ background: rs.bg, color: rs.color }}
+                title={sc > 0 ? `News: ${ss > 0 ? "+" : ""}${ss.toFixed(2)} (${(sc * 100).toFixed(0)}%)` : undefined}>
                 {p.split("/")[0]} {rs.label}
+                {sIcon && <span style={{ color: sCol, fontSize: "8px" }}>{sIcon}</span>}
               </span>
             );
           })}
@@ -1033,11 +1039,19 @@ function SelbstOptimierungPanel({ optData, pairs }: {
           const allowSells = regimeKey === "ranging" || regimeKey === "trend_down"
             || (regimeKey === "trend_up" && rsi > 60) || (regimeKey === "volatile" && rsi > 70);
 
+          const sentScore = m.regime?.sentiment_score ?? 0;
+          const sentConf = m.regime?.sentiment_confidence ?? 0;
+          const sentIcon = sentScore > 0.3 ? "\u25B2" : sentScore < -0.3 ? "\u25BC" : "\u2500";
+          const sentColor = sentScore > 0.3 ? "var(--up)" : sentScore < -0.3 ? "var(--down)" : "var(--text-tertiary)";
+
           return (
             <div key={p} className="rounded-lg p-3" style={{ background: "var(--bg-secondary)" }}>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-bold">{p}</span>
-                <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold" style={{ background: rs.bg, color: rs.color }}>{rs.label}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold" style={{ background: rs.bg, color: rs.color }}>{rs.label}</span>
+                  <span title={`News: ${sentScore > 0 ? "+" : ""}${sentScore.toFixed(2)} (Conf ${(sentConf * 100).toFixed(0)}%)`} className="text-[10px] font-bold cursor-default" style={{ color: sentColor }}>{sentIcon}</span>
+                </div>
               </div>
               <div className="grid grid-cols-3 gap-1 text-[9px] mb-2">
                 <div className="text-center"><span className="text-[var(--text-quaternary)]">RSI</span> <span className="font-mono font-bold" style={{ color: rsi > 70 ? "var(--down)" : rsi < 30 ? "var(--up)" : "var(--text-secondary)" }}>{rsi.toFixed(0)}</span></div>
@@ -1142,13 +1156,14 @@ function BotGesundheit({ pi, status }: { pi: PiStatus | null; status: BotStatus 
 const EVT_ICONS: Record<string, string> = {
   trade: "T", grid: "G", error: "!", config: "C", system: "S",
   monitoring: "\u26A1", regime: "R", optimization: "\u2699", trailing_tp: "\u2197", memory: "M",
+  sentiment: "\uD83D\uDCF0",
 };
 const EVT_COLORS: Record<string, string> = {
   trade: "var(--accent)", grid: "var(--cyan)", error: "var(--down)",
   warn: "var(--warn)", critical: "#ef4444", success: "var(--up)",
   config: "var(--text-secondary)", system: "var(--text-tertiary)",
   monitoring: "var(--warn)", regime: "#3b82f6", optimization: "var(--accent)",
-  trailing_tp: "var(--up)", memory: "var(--warn)",
+  trailing_tp: "var(--up)", memory: "var(--warn)", sentiment: "#8b5cf6",
 };
 
 const REGIME_STYLE: Record<string, { label: string; color: string; bg: string }> = {

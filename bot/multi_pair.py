@@ -26,6 +26,7 @@ from bot.regime_detector import Regime, RegimeDetector
 from bot.risk_manager import RiskManager
 from bot.self_optimizer import SelfOptimizer
 from bot.telegram_bot import TelegramNotifier
+from bot.news_sentiment import NewsSentiment
 from bot.trailing_tp import TrailingTakeProfit
 
 try:
@@ -549,6 +550,12 @@ class MultiPairBot:
         self.allocator = CapitalAllocator()
         self.optimizer = SelfOptimizer(self.tracker)
         self.trailing_tp = TrailingTakeProfit()
+        self.sentiment = NewsSentiment(
+            api_key=config.sentiment.api_key,
+            provider=config.sentiment.provider,
+            fetch_interval=config.sentiment.fetch_interval,
+            cache_validity=config.sentiment.cache_validity,
+        )
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
         self._running = False
@@ -751,6 +758,8 @@ class MultiPairBot:
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
             tasks.append(asyncio.create_task(self._memory_watchdog()))
+        if self.config.sentiment.enabled:
+            tasks.append(asyncio.create_task(self._sentiment_loop()))
 
         try:
             while self._running:
@@ -775,6 +784,8 @@ class MultiPairBot:
         if self.config.is_pi:
             tasks.append(asyncio.create_task(self._gc_loop()))
             tasks.append(asyncio.create_task(self._memory_watchdog()))
+        if self.config.sentiment.enabled:
+            tasks.append(asyncio.create_task(self._sentiment_loop()))
         try:
             while self._running:
                 await asyncio.sleep(1)
@@ -1465,6 +1476,34 @@ class MultiPairBot:
             self.tracker.save_daily_report({"summaries": summaries})
             if self.config.is_pi:
                 self.tracker.prune_old_snapshots(keep_days=30)
+
+    async def _sentiment_loop(self):
+        """Fetch news sentiment every 15 min and inject into RegimeDetectors."""
+        while self._running:
+            try:
+                signal = await self.sentiment.get_signal(self.config.pairs)
+                for bot in self.bots.values():
+                    bot.regime.set_sentiment(signal.score, signal.confidence)
+                if abs(signal.score) > 0.5:
+                    asyncio.create_task(self.cloud.log_event(
+                        category="sentiment",
+                        level="info",
+                        message=f"News-Sentiment: {signal.score:+.2f} ({signal.reason})",
+                        detail={
+                            "score": signal.score,
+                            "confidence": signal.confidence,
+                            "headlines": signal.headlines[:5],
+                            "source": signal.source,
+                        },
+                    ))
+                    logger.info(
+                        "Sentiment: %.2f conf=%.0f%% src=%s — %s",
+                        signal.score, signal.confidence * 100,
+                        signal.source, signal.reason,
+                    )
+            except Exception:
+                logger.exception("Sentiment-Loop Fehler")
+            await asyncio.sleep(15 * 60)
 
     async def _gc_loop(self):
         """Periodic garbage collection for memory-constrained Pi."""

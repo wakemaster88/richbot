@@ -86,6 +86,8 @@ class RegimeDetector:
         self._boll_width: float = 0.0
         self._avg_boll_width: float = 0.0
         self._boll_width_history: list[float] = []
+        self._sentiment_score: float = 0.0
+        self._sentiment_confidence: float = 0.0
 
     @property
     def regime(self) -> Regime:
@@ -95,14 +97,18 @@ class RegimeDetector:
     def rsi_value(self) -> float:
         return self._rsi
 
+    def set_sentiment(self, score: float, confidence: float):
+        """Inject external news-sentiment signal."""
+        self._sentiment_score = max(-1.0, min(1.0, score))
+        self._sentiment_confidence = max(0.0, min(1.0, confidence))
+
     def update(self, ohlcv: np.ndarray) -> Regime:
-        """Update regime from OHLCV data.
+        """Update regime from OHLCV data + optional sentiment overlay.
 
-        Args:
-            ohlcv: 2D array with columns [timestamp, open, high, low, close, volume]
-
-        Returns:
-            The detected Regime.
+        Technical analysis determines the regime first.  Sentiment can
+        only nudge the ADX threshold in borderline cases or force
+        VOLATILE on extreme bearish news — it never overrides a clear
+        technical signal.
         """
         if len(ohlcv) < 5:
             return self._regime
@@ -130,23 +136,41 @@ class RegimeDetector:
 
         old_regime = self._regime
 
+        sent = self._sentiment_score
+        conf = self._sentiment_confidence
+
+        # Sentiment shifts the ADX trend-detection threshold
+        if conf > 0.6 and abs(sent) > 0.3:
+            adx_trend_threshold = 25.0 - (sent * 5.0 * conf)
+        else:
+            adx_trend_threshold = 25.0
+
         if self._avg_boll_width > 0 and self._boll_width > 2.0 * self._avg_boll_width:
             self._regime = Regime.VOLATILE
         elif self._adx < 20:
             self._regime = Regime.RANGING
-        elif self._adx >= 25:
+        elif self._adx >= adx_trend_threshold:
             if ema9_last > ema21_last:
                 self._regime = Regime.TREND_UP
             else:
                 self._regime = Regime.TREND_DOWN
-        # ADX 20–25: transition zone — keep previous regime
+        # ADX between 20 and threshold: transition zone — keep previous
+
+        # Extreme bearish sentiment overrides to VOLATILE (safety switch)
+        if sent < -0.7 and conf > 0.8 and self._regime != Regime.VOLATILE:
+            logger.warning(
+                "Sentiment-Override → VOLATILE (score=%.2f, conf=%.2f)",
+                sent, conf,
+            )
+            self._regime = Regime.VOLATILE
 
         if self._regime != old_regime:
             logger.info(
-                "Regime: %s → %s (ADX=%.1f, RSI=%.1f, BollW=%.4f/avg %.4f, EMA9=%.2f/EMA21=%.2f)",
+                "Regime: %s → %s (ADX=%.1f, RSI=%.1f, BollW=%.4f/avg %.4f, "
+                "EMA9=%.2f/EMA21=%.2f, Sent=%.2f@%.0f%%)",
                 old_regime.value, self._regime.value,
                 self._adx, self._rsi, self._boll_width, self._avg_boll_width,
-                ema9_last, ema21_last,
+                ema9_last, ema21_last, sent, conf * 100,
             )
 
         return self._regime
@@ -157,15 +181,21 @@ class RegimeDetector:
     def get_entry_filter(self) -> EntryFilter:
         r = self._regime
         rsi = self._rsi
+        sent = self._sentiment_score
+        conf = self._sentiment_confidence
+        bullish = sent > 0.5 and conf > 0.7
+        bearish = sent < -0.5 and conf > 0.7
 
         if r == Regime.RANGING:
             return EntryFilter(allow_buys=True, allow_sells=True, rsi_value=rsi)
 
         if r == Regime.TREND_UP:
-            return EntryFilter(allow_buys=True, allow_sells=(rsi > 72), rsi_value=rsi)
+            sell_thresh = 80.0 if bullish else 72.0
+            return EntryFilter(allow_buys=True, allow_sells=(rsi > sell_thresh), rsi_value=rsi)
 
         if r == Regime.TREND_DOWN:
-            return EntryFilter(allow_buys=(rsi < 28), allow_sells=True, rsi_value=rsi)
+            buy_thresh = 20.0 if bearish else 28.0
+            return EntryFilter(allow_buys=(rsi < buy_thresh), allow_sells=True, rsi_value=rsi)
 
         # VOLATILE
         return EntryFilter(allow_buys=(rsi < 30), allow_sells=(rsi > 70), rsi_value=rsi)
@@ -178,4 +208,6 @@ class RegimeDetector:
             "adx": round(self._adx, 1),
             "boll_width": round(self._boll_width, 4),
             "avg_boll_width": round(self._avg_boll_width, 4),
+            "sentiment_score": round(self._sentiment_score, 2),
+            "sentiment_confidence": round(self._sentiment_confidence, 2),
         }
