@@ -50,7 +50,21 @@ interface PairMetrics {
     base_value: number; quote_value: number;
     description: string; needs_rebalance: boolean;
   };
+  circuit_breaker?: CBPairStatus;
   open_orders?: OpenOrder[];
+}
+interface CBPairStatus {
+  level: string; drawdown_pct: number; peak_equity: number;
+  vol_adj: number; yellow_threshold: number; orange_threshold: number; red_threshold: number;
+  size_factor: number; spacing_mult: number;
+  can_buy: boolean; can_sell: boolean;
+  resume_in_sec: number; triggered_at: number;
+}
+interface CBGlobalData {
+  global_halt: boolean; cascade_threshold: number;
+  pairs_at_orange_plus: number; pairs_at_red: number;
+  pairs: Record<string, CBPairStatus>;
+  history: { timestamp: number; pair: string; level: string; drawdown_pct: number; threshold_pct: number; vol_adj: number }[];
 }
 interface Trade {
   id: string; timestamp: string; pair: string; side: string;
@@ -488,7 +502,18 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
             {coin}
           </div>
           <div>
-            <h3 className="font-semibold text-sm leading-tight">{pair}</h3>
+            <div className="flex items-center gap-1.5">
+              <h3 className="font-semibold text-sm leading-tight">{pair}</h3>
+              {m.circuit_breaker && m.circuit_breaker.level !== "GREEN" && (
+                <span className="text-[7px] font-bold px-1 py-px rounded"
+                  style={{
+                    background: CB_BG[m.circuit_breaker.level] || CB_BG.GREEN,
+                    color: CB_COLORS[m.circuit_breaker.level] || CB_COLORS.GREEN,
+                  }}>
+                  {m.circuit_breaker.level}
+                </span>
+              )}
+            </div>
             <p className="text-[9px] text-[var(--text-quaternary)] font-mono">{m.range}</p>
           </div>
         </div>
@@ -649,6 +674,102 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// -- Circuit Breaker Panel --
+
+const CB_COLORS: Record<string, string> = {
+  GREEN: "var(--up)", YELLOW: "#eab308", ORANGE: "#f97316", RED: "var(--down)",
+};
+const CB_BG: Record<string, string> = {
+  GREEN: "color-mix(in srgb, var(--up) 12%, transparent)",
+  YELLOW: "color-mix(in srgb, #eab308 15%, transparent)",
+  ORANGE: "color-mix(in srgb, #f97316 18%, transparent)",
+  RED: "color-mix(in srgb, var(--down) 18%, transparent)",
+};
+
+function CircuitBreakerPanel({ cbGlobal, pairs }: { cbGlobal: CBGlobalData; pairs: [string, PairMetrics][] }) {
+  const hasActive = pairs.some(([, m]) => m.circuit_breaker && m.circuit_breaker.level !== "GREEN");
+
+  if (!hasActive && !cbGlobal.global_halt && (!cbGlobal.history || cbGlobal.history.length === 0)) {
+    return null;
+  }
+
+  return (
+    <div className="card p-4 sm:p-5 fade-in">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold text-xs">Circuit Breaker</h3>
+        {cbGlobal.global_halt && (
+          <span className="px-2 py-0.5 rounded text-[9px] font-bold animate-pulse"
+            style={{ background: CB_BG.RED, color: CB_COLORS.RED }}>
+            CASCADE HALT
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3">
+        {pairs.map(([p, m]) => {
+          const cb = m.circuit_breaker;
+          if (!cb) return null;
+          const lvl = cb.level || "GREEN";
+          const col = CB_COLORS[lvl] || CB_COLORS.GREEN;
+          const bg = CB_BG[lvl] || CB_BG.GREEN;
+          const coin = p.split("/")[0];
+          return (
+            <div key={p} className="card-inner px-3 py-2 rounded-lg flex items-center gap-2 min-w-[120px]"
+              style={{ borderLeft: `3px solid ${col}` }}>
+              <div className="flex flex-col">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full" style={{ background: col, boxShadow: lvl !== "GREEN" ? `0 0 6px ${col}` : "none" }} />
+                  <span className="text-[10px] font-bold">{coin}</span>
+                  <span className="text-[8px] font-semibold px-1 py-px rounded" style={{ background: bg, color: col }}>{lvl}</span>
+                </div>
+                <div className="text-[8px] text-[var(--text-quaternary)] mt-0.5 font-mono">
+                  DD {cb.drawdown_pct.toFixed(1)}%
+                  <span className="text-[7px] ml-1">
+                    (Y:{cb.yellow_threshold.toFixed(1)} O:{cb.orange_threshold.toFixed(1)} R:{cb.red_threshold.toFixed(1)})
+                  </span>
+                </div>
+                {cb.resume_in_sec > 0 && (
+                  <span className="text-[8px] font-medium mt-0.5" style={{ color: col }}>
+                    Resume in {Math.ceil(cb.resume_in_sec / 60)}min
+                  </span>
+                )}
+                {lvl !== "GREEN" && (
+                  <div className="flex gap-2 text-[7px] text-[var(--text-quaternary)] mt-0.5">
+                    <span>Size: {(cb.size_factor * 100).toFixed(0)}%</span>
+                    {cb.spacing_mult > 1 && <span>Spacing: ×{cb.spacing_mult.toFixed(1)}</span>}
+                    {!cb.can_buy && <span className="text-[var(--down)] font-semibold">Buys gesperrt</span>}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {cbGlobal.history && cbGlobal.history.length > 0 && (
+        <div>
+          <p className="text-[8px] text-[var(--text-quaternary)] uppercase mb-1 font-semibold">History</p>
+          <div className="space-y-0.5 max-h-24 overflow-y-auto">
+            {cbGlobal.history.slice(0, 8).map((ev, i) => {
+              const col = CB_COLORS[ev.level] || "var(--text-tertiary)";
+              const zeit = new Date(ev.timestamp * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+              return (
+                <div key={i} className="flex items-center gap-2 text-[8px] py-0.5">
+                  <span className="text-[var(--text-quaternary)] font-mono w-10">{zeit}</span>
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: col }} />
+                  <span className="font-semibold" style={{ color: col }}>{ev.level}</span>
+                  <span className="text-[var(--text-tertiary)]">{ev.pair.split("/")[0]}</span>
+                  <span className="text-[var(--text-quaternary)] font-mono">DD {ev.drawdown_pct}% (Schwelle {ev.threshold_pct}%)</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1976,10 +2097,11 @@ export default function Dashboard() {
   };
 
   const status = botStatus || DEMO_STATUS;
-  const rawStatuses = (status.pairStatuses || {}) as Record<string, PairMetrics | WalletData | CorrelationData>;
+  const rawStatuses = (status.pairStatuses || {}) as Record<string, PairMetrics | WalletData | CorrelationData | CBGlobalData>;
   const walletData = (rawStatuses["__wallet__"] || null) as WalletData | null;
   const correlationData = (rawStatuses["__correlation__"] || null) as CorrelationData | null;
-  const pairs = Object.entries(rawStatuses).filter(([k]) => k !== "__wallet__" && k !== "__correlation__") as [string, PairMetrics][];
+  const cbGlobal = (rawStatuses["__circuit_breaker__"] || null) as CBGlobalData | null;
+  const pairs = Object.entries(rawStatuses).filter(([k]) => !k.startsWith("__")) as [string, PairMetrics][];
   const quoteCcy = status.pairs?.[0]?.split("/")?.[1] || "USDC";
   const totalPnl = pairs.reduce((s, [, m]) => s + (m.total_pnl || 0), 0);
   const walletTotal = walletData?._total_usdc ?? pairs.reduce((s, [, m]) => s + (m.current_equity || 0), 0);
@@ -2107,6 +2229,9 @@ export default function Dashboard() {
           <div className="lg:col-span-2 card p-5 flex items-center justify-center text-[11px] text-[var(--text-quaternary)]">Keine Paare aktiv</div>
         </div>
       )}
+
+      {/* 3b. Circuit Breaker */}
+      {cbGlobal && <div className="mb-3"><CircuitBreakerPanel cbGlobal={cbGlobal} pairs={pairs} /></div>}
 
       {/* 4. Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">

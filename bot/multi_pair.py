@@ -14,6 +14,7 @@ import time
 import pandas as pd
 
 from bot.capital_allocator import CapitalAllocator, AllocationResult
+from bot.circuit_breaker import CircuitBreaker, CBLevel
 from bot.cloud_sync import CloudSync
 from bot.config import BotConfig
 from bot.correlation import CorrelationMonitor
@@ -51,7 +52,8 @@ class PairBot:
                  cloud: CloudSync | None = None,
                  fee_engine: FeeEngine | None = None,
                  inventory: InventoryTracker | None = None,
-                 inventory_skew: InventorySkew | None = None):
+                 inventory_skew: InventorySkew | None = None,
+                 circuit_breaker: CircuitBreaker | None = None):
         self.pair = pair
         self.config = config
         self.exchange = exchange
@@ -63,6 +65,7 @@ class PairBot:
         self.fee_engine = fee_engine
         self.inventory = inventory or InventoryTracker()
         self.inv_skew = inventory_skew or InventorySkew()
+        self.cb = circuit_breaker or CircuitBreaker()
 
         self.pair_grid_count = 4  # will be set by CapitalAllocator
         self.pair_amount = 0.0
@@ -393,6 +396,9 @@ class PairBot:
         """Process a price update."""
         self.current_price = price
 
+        cb_ok, cb_reason = self.cb.can_trade(self.pair)
+        if not cb_ok:
+            return
         can_trade, reason = self.risk.can_trade()
         if not can_trade:
             return
@@ -522,18 +528,25 @@ class PairBot:
             if self.cloud and self.cloud.connected:
                 await self.cloud.sync_equity(self.pair, usdt)
 
-            risk_status = self.risk.update_equity(usdt)
-            if risk_status["is_paused"]:
-                await self.telegram.alert_drawdown_stop(
-                    self.pair, risk_status["drawdown_pct"], usdt,
-                )
-                await self.order_mgr.cancel_all(self.pair)
+            self.risk.update_equity(usdt)
+
+            old_cb = self.cb.get_level(self.pair)
+            new_cb = self.cb.update_equity(self.pair, usdt)
+
+            if new_cb > old_cb:
+                cb_name = {CBLevel.YELLOW: "YELLOW", CBLevel.ORANGE: "ORANGE", CBLevel.RED: "RED"}.get(new_cb, "?")
+                cb_status = self.cb.get_pair_status(self.pair)
+                if new_cb == CBLevel.RED:
+                    await self.telegram.alert_drawdown_stop(self.pair, cb_status["drawdown_pct"], usdt)
+                    await self.order_mgr.cancel_all(self.pair)
                 if self.cloud and self.cloud.connected:
+                    level_str = "critical" if new_cb == CBLevel.RED else "warn"
                     asyncio.create_task(self.cloud.log_event(
-                        "error", f"Trading pausiert: Drawdown {risk_status['drawdown_pct']:.1f}% (Auto-Resume in 5 Min)",
-                        {"pair": self.pair, "drawdown": risk_status["drawdown_pct"],
-                         "equity": usdt, "peak": risk_status["peak"]},
-                        level="warn",
+                        "circuit_breaker",
+                        f"CB {self.pair} → {cb_name}: DD {cb_status['drawdown_pct']:.1f}% "
+                        f"(Schwelle {cb_status[cb_name.lower() + '_threshold']:.1f}%, vol_adj {cb_status['vol_adj']:.1f}x)",
+                        {"pair": self.pair, **cb_status},
+                        level=level_str,
                     ))
         except Exception as e:
             logger.error("Equity update failed for %s: %s", self.pair, e)
@@ -576,11 +589,16 @@ class PairBot:
 
     def _entry_filter_dict(self, base_balance: float | None = None) -> dict:
         ef = self.regime.get_entry_filter()
+        allow_buys = ef.allow_buys
         allow_sells = ef.allow_sells
         if allow_sells and base_balance is not None and self.is_sell_drain_active(base_balance):
             allow_sells = False
             logger.warning("%s: Sell-Drain-Schutz aktiv — >60%% Base in 10 Min verkauft", self.pair)
-        return {"allow_buys": ef.allow_buys, "allow_sells": allow_sells}
+        if not self.cb.can_buy(self.pair):
+            allow_buys = False
+        if not self.cb.can_sell(self.pair):
+            allow_sells = False
+        return {"allow_buys": allow_buys, "allow_sells": allow_sells}
 
     def get_status(self) -> dict:
         open_orders = self.order_mgr.get_open_orders(self.pair)
@@ -631,6 +649,7 @@ class PairBot:
             "fee_metrics": fee_metrics,
             "inventory": inv_metrics,
             "skew": self.inv_skew.get_metrics(self.pair),
+            "circuit_breaker": self.cb.get_pair_status(self.pair),
             **self.tracker.get_summary(self.pair),
         }
 
@@ -655,6 +674,7 @@ class MultiPairBot:
         self.fee_engine = FeeEngine()
         self.inventory = InventoryTracker()
         self.inv_skew = InventorySkew()
+        self.cb = CircuitBreaker(base_threshold=config.risk.max_drawdown_percent)
         self.correlation = CorrelationMonitor(config.pairs)
         self.sentiment = NewsSentiment(
             api_key=config.sentiment.api_key,
@@ -825,7 +845,8 @@ class MultiPairBot:
             bot = PairBot(pair, self.config, self.exchange, self.risk,
                           self.tracker, self.telegram, ml, self.cloud,
                           fee_engine=self.fee_engine, inventory=self.inventory,
-                          inventory_skew=self.inv_skew)
+                          inventory_skew=self.inv_skew,
+                          circuit_breaker=self.cb)
             self.pair_bots[pair] = bot
 
         saved_state = await self.cloud.load_state() if self.cloud.connected else None
@@ -1207,6 +1228,10 @@ class MultiPairBot:
                     pair, timeframe=self.config.atr.timeframe, limit=fetch_limit,
                 )
                 ohlcv_arr = _np.array(ohlcv, dtype=_np.float64)
+                if len(ohlcv_arr) >= 14:
+                    from bot import indicators as _ind
+                    atr_val = _ind.atr(ohlcv_arr[:, 2], ohlcv_arr[:, 3], ohlcv_arr[:, 4], 14)
+                    self.cb.update_atr(pair, atr_val)
                 old_regime = bot.regime.regime
                 new_regime = bot.regime.update(ohlcv_arr)
                 if new_regime != old_regime and self.cloud.connected:
@@ -1244,6 +1269,7 @@ class MultiPairBot:
                 corr_metrics = self.correlation.get_metrics()
                 if corr_metrics:
                     metrics["__correlation__"] = corr_metrics
+                metrics["__circuit_breaker__"] = self.cb.get_metrics()
                 wallet = await self._fetch_wallet()
                 self.cloud.update_status("running", self.config.pairs, metrics, wallet)
 
@@ -1308,22 +1334,17 @@ class MultiPairBot:
                 ))
                 self._mon_state["last_alert"][alert_key] = now
 
-            # Drawdown checks
-            dd = summary.get("max_drawdown_pct", 0)
-            if dd > 5:
-                alert_key = f"dd_critical_{pair}"
+            # Circuit breaker monitoring
+            cb_status = self.cb.get_pair_status(pair)
+            cb_level = cb_status["level"]
+            if cb_level != "GREEN":
+                alert_key = f"cb_{cb_level}_{pair}"
                 if now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
+                    lvl = "critical" if cb_level == "RED" else "warn"
                     asyncio.create_task(self.cloud.log_event(
-                        "monitoring", f"Drawdown {dd:.1f}% — Trading pausiert ({pair})",
-                        {"pair": pair, "drawdown": dd}, level="critical",
-                    ))
-                    self._mon_state["last_alert"][alert_key] = now
-            elif dd > 3:
-                alert_key = f"dd_warn_{pair}"
-                if now - self._mon_state["last_alert"].get(alert_key, 0) > cooldown:
-                    asyncio.create_task(self.cloud.log_event(
-                        "monitoring", f"Drawdown {dd:.1f}% — Position-Size reduziert ({pair})",
-                        {"pair": pair, "drawdown": dd}, level="warn",
+                        "monitoring",
+                        f"CB {cb_level} aktiv — DD {cb_status['drawdown_pct']:.1f}% ({pair})",
+                        {"pair": pair, **cb_status}, level=lvl,
                     ))
                     self._mon_state["last_alert"][alert_key] = now
 
@@ -1766,8 +1787,15 @@ class MultiPairBot:
                         logger.info("%s: Korrelations-Reduktion %.0f%% auf Positionsgroesse",
                                     pair, (1 - corr_factor) * 100)
 
+                    cb_size = self.cb.size_factor(pair)
+                    if cb_size < 1.0:
+                        alloc.buy_budget *= cb_size
+                        alloc.sell_budget *= cb_size
+                        alloc.amount_per_order *= cb_size
+                        logger.info("%s: CB Size-Reduktion → %.0f%%", pair, cb_size * 100)
+
                     bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
-                    bot.grid.spacing_percent *= rp.spacing_mult
+                    bot.grid.spacing_percent *= rp.spacing_mult * self.cb.spacing_mult(pair)
 
                     await bot.order_mgr.cancel_all(pair)
                     rp_a = bot.regime.get_grid_params()
@@ -2082,7 +2110,8 @@ class MultiPairBot:
                 bot = PairBot(pair, self.config, self.exchange, self.risk,
                               self.tracker, self.telegram, ml, self.cloud,
                               fee_engine=self.fee_engine, inventory=self.inventory,
-                              inventory_skew=self.inv_skew)
+                              inventory_skew=self.inv_skew,
+                              circuit_breaker=self.cb)
                 self.pair_bots[pair] = bot
                 try:
                     await bot.initialize(self.allocator, len(self.pair_bots), None)
