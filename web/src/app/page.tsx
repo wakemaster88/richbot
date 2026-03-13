@@ -648,11 +648,17 @@ function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC"
 
   const data = klines.map((k, i) => {
     const trades = tradeMap.get(i);
+    const buys = trades?.filter(t => t.side === "buy") || [];
+    const sells = trades?.filter(t => t.side === "sell") || [];
+    const avgBuy = buys.length ? buys.reduce((s, t) => s + t.price, 0) / buys.length : undefined;
+    const avgSell = sells.length ? sells.reduce((s, t) => s + t.price, 0) / sells.length : undefined;
     return {
       zeit: new Date(k.t).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
       preis: k.c, hoch: k.h, tief: k.l,
-      buyMarker: trades?.find(t => t.side === "buy") ? trades.find(t => t.side === "buy")!.price : undefined,
-      sellMarker: trades?.find(t => t.side === "sell") ? trades.find(t => t.side === "sell")!.price : undefined,
+      buyMarker: avgBuy,
+      sellMarker: avgSell,
+      _buyCount: buys.length,
+      _sellCount: sells.length,
       _trades: trades || undefined,
     };
   });
@@ -709,8 +715,8 @@ function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC"
               <stop offset="0%" stopColor={col} stopOpacity={0.12} />
               <stop offset="100%" stopColor={col} stopOpacity={0} />
             </linearGradient>
-            <filter id={gbId}><feDropShadow dx="0" dy="0" stdDeviation="2.5" floodColor="#10b981" floodOpacity="0.7" /></filter>
-            <filter id={gsId}><feDropShadow dx="0" dy="0" stdDeviation="2.5" floodColor="#ef4444" floodOpacity="0.7" /></filter>
+            <filter id={gbId} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="1.2" floodColor="#10b981" floodOpacity="0.5" /></filter>
+            <filter id={gsId} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="1.2" floodColor="#ef4444" floodOpacity="0.5" /></filter>
           </defs>
           <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" vertical={false} />
           <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
@@ -763,27 +769,37 @@ function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC"
               label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "#22c55e" : "#ef4444", fontSize: 7, position: o.side === "buy" ? "left" : "right", offset: 4 }} />
           ))}
           <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill={`url(#${gId})`} dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
-          <Scatter dataKey="buyMarker" fill="#10b981" stroke="#065f46" strokeWidth={1.5}
-            shape={(props: { cx?: number; cy?: number }) => {
+          <Scatter dataKey="buyMarker" fill="#10b981" isAnimationActive={false}
+            shape={(props: { cx?: number; cy?: number; payload?: Record<string, unknown> }) => {
               if (!props.cx || !props.cy) return <></>;
+              const cnt = (props.payload?._buyCount as number) || 1;
+              const r = cnt > 1 ? 7 : 4.5;
               return (
-                <g filter={`url(#${gbId})`} className="trade-marker-buy">
-                  <circle cx={props.cx} cy={props.cy} r={5} fill="#10b981" stroke="#065f46" strokeWidth={1} />
-                  <circle cx={props.cx} cy={props.cy} r={2.5} fill="#34d399" strokeWidth={0} />
-                  <polygon points={`${props.cx - 3},${props.cy + 1} ${props.cx},${props.cy - 3} ${props.cx + 3},${props.cy + 1}`}
-                    fill="#fff" fillOpacity={0.9} strokeWidth={0} />
+                <g filter={`url(#${gbId})`} style={{ cursor: "pointer" }}>
+                  <circle cx={props.cx} cy={props.cy} r={r} fill="#10b981" stroke="#065f46" strokeWidth={1} />
+                  {cnt === 1 ? (
+                    <polygon points={`${props.cx - 2},${props.cy + 0.8} ${props.cx},${props.cy - 2} ${props.cx + 2},${props.cy + 0.8}`}
+                      fill="#fff" fillOpacity={0.85} />
+                  ) : (
+                    <text x={props.cx} y={props.cy + 3} textAnchor="middle" fill="#fff" fontSize={8} fontWeight={700} style={{ fontFamily: "JetBrains Mono, monospace" }}>{cnt}</text>
+                  )}
                 </g>
               );
             }} />
-          <Scatter dataKey="sellMarker" fill="#ef4444" stroke="#7f1d1d" strokeWidth={1.5}
-            shape={(props: { cx?: number; cy?: number }) => {
+          <Scatter dataKey="sellMarker" fill="#ef4444" isAnimationActive={false}
+            shape={(props: { cx?: number; cy?: number; payload?: Record<string, unknown> }) => {
               if (!props.cx || !props.cy) return <></>;
+              const cnt = (props.payload?._sellCount as number) || 1;
+              const r = cnt > 1 ? 7 : 4.5;
               return (
-                <g filter={`url(#${gsId})`} className="trade-marker-sell">
-                  <circle cx={props.cx} cy={props.cy} r={5} fill="#ef4444" stroke="#7f1d1d" strokeWidth={1} />
-                  <circle cx={props.cx} cy={props.cy} r={2.5} fill="#fca5a5" strokeWidth={0} />
-                  <polygon points={`${props.cx - 3},${props.cy - 1} ${props.cx},${props.cy + 3} ${props.cx + 3},${props.cy - 1}`}
-                    fill="#fff" fillOpacity={0.9} strokeWidth={0} />
+                <g filter={`url(#${gsId})`} style={{ cursor: "pointer" }}>
+                  <circle cx={props.cx} cy={props.cy} r={r} fill="#ef4444" stroke="#7f1d1d" strokeWidth={1} />
+                  {cnt === 1 ? (
+                    <polygon points={`${props.cx - 2},${props.cy - 0.8} ${props.cx},${props.cy + 2} ${props.cx + 2},${props.cy - 0.8}`}
+                      fill="#fff" fillOpacity={0.85} />
+                  ) : (
+                    <text x={props.cx} y={props.cy + 3} textAnchor="middle" fill="#fff" fontSize={8} fontWeight={700} style={{ fontFamily: "JetBrains Mono, monospace" }}>{cnt}</text>
+                  )}
                 </g>
               );
             }} />
