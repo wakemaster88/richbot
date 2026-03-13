@@ -121,13 +121,18 @@ class GridBandit:
         return s
 
     def choose_action(self, state: np.ndarray) -> dict[str, Any]:
-        """Epsilon-greedy action selection."""
+        """Epsilon-greedy action selection (NaN-safe)."""
+        np.nan_to_num(state, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+
         explore = np.random.random() < self._exploration
         if explore:
             action_idx = int(np.random.randint(N_ACTIONS))
         else:
             scores = self.W @ state
-            action_idx = int(np.argmax(scores))
+            if not np.all(np.isfinite(scores)):
+                action_idx = int(np.random.randint(N_ACTIONS))
+            else:
+                action_idx = int(np.argmax(scores))
 
         self._pending = (state.copy(), action_idx)
 
@@ -137,20 +142,27 @@ class GridBandit:
         return result
 
     def record_reward(self, reward: float):
-        """REINFORCE-style gradient update on the linear policy."""
+        """REINFORCE-style gradient update on the linear policy (NaN-safe)."""
         if self._pending is None:
             return
+
+        if not math.isfinite(reward):
+            reward = 0.0
 
         state, action_idx = self._pending
         self._pending = None
 
         scores = self.W @ state
+        if not np.all(np.isfinite(scores)):
+            scores = np.zeros(N_ACTIONS, dtype=np.float32)
         probs = _softmax(scores)
 
         grad = -probs.copy()
         grad[action_idx] += 1.0  # one_hot - probs
 
-        self.W += LEARNING_RATE * reward * np.outer(grad, state)
+        update = LEARNING_RATE * reward * np.outer(grad, state)
+        if np.all(np.isfinite(update)):
+            self.W += update
 
         self._exploration = max(MIN_EXPLORATION, self._exploration * DECAY_RATE)
         self._episode_count += 1

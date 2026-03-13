@@ -98,9 +98,10 @@ class RegimeDetector:
         return self._rsi
 
     def set_sentiment(self, score: float, confidence: float):
-        """Inject external news-sentiment signal."""
-        self._sentiment_score = max(-1.0, min(1.0, score))
-        self._sentiment_confidence = max(0.0, min(1.0, confidence))
+        """Inject external news-sentiment signal (NaN-safe)."""
+        import math
+        self._sentiment_score = max(-1.0, min(1.0, score)) if math.isfinite(score) else 0.0
+        self._sentiment_confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 0.0
 
     def update(self, ohlcv: np.ndarray) -> Regime:
         """Update regime from OHLCV data + optional sentiment overlay.

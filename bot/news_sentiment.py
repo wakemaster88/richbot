@@ -67,7 +67,7 @@ class NewsSentiment:
 
     # ── public API ────────────────────────────────────────────────
 
-    async def get_signal(self, pairs: list[str]) -> SentimentSignal | None:
+    async def get_signal(self, pairs: list[str]) -> SentimentSignal:
         now = _time.time()
 
         if self._last_signal and now - self._last_fetch < self._fetch_interval:
@@ -75,7 +75,11 @@ class NewsSentiment:
 
         headlines = await self.fetch_headlines(pairs)
         if not headlines:
-            return self._last_signal
+            return self._last_signal or SentimentSignal(
+                score=0.0, confidence=0.0, headlines=[],
+                reason="Keine Headlines verfügbar", source="none",
+                timestamp=now,
+            )
 
         if self._api_key and self._provider != "local" and now > self._rate_limited_until:
             signal = await self._classify_with_llm(headlines)
