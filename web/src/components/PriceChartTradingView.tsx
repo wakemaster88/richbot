@@ -108,35 +108,42 @@ function PriceChartBase({
   useEffect(() => {
     if (!chartContainerRef.current || !klines.length) return;
 
+    const cs = getComputedStyle(chartContainerRef.current);
+    const resolveVar = (v: string) => cs.getPropertyValue(v).trim() || v;
+
+    const textQuat = resolveVar("--text-quaternary");
+    const borderSubtle = resolveVar("--border-subtle");
+    const accent = resolveVar("--accent");
+
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "var(--text-quaternary)",
+        textColor: textQuat,
         fontFamily: "JetBrains Mono, system-ui, sans-serif",
       },
       grid: {
-        vertLines: { color: "var(--border-subtle)", style: 1 },
-        horzLines: { color: "var(--border-subtle)", style: 1 },
+        vertLines: { color: borderSubtle, style: 1 },
+        horzLines: { color: borderSubtle, style: 1 },
       },
       crosshair: {
         vertLine: {
-          color: "var(--accent)",
+          color: accent,
           width: 1,
-          labelBackgroundColor: "var(--accent)",
+          labelBackgroundColor: accent,
         },
         horzLine: {
-          color: "var(--accent)",
+          color: accent,
           width: 1,
-          labelBackgroundColor: "var(--accent)",
+          labelBackgroundColor: accent,
         },
       },
       rightPriceScale: {
-        borderColor: "var(--border-subtle)",
+        borderColor: borderSubtle,
         scaleMargins: { top: 0.1, bottom: 0.2 },
-        textColor: "var(--text-quaternary)",
+        textColor: textQuat,
       },
       timeScale: {
-        borderColor: "var(--border-subtle)",
+        borderColor: borderSubtle,
         timeVisible: true,
         secondsVisible: false,
       },
