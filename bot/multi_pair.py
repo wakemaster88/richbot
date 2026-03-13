@@ -1246,7 +1246,7 @@ class MultiPairBot:
                     ))
 
     async def _optimization_loop(self):
-        """Self-optimize every 6 hours based on recent performance.
+        """Self-optimize based on recent performance.
 
         Heuristic SelfOptimizer remains the primary layer.
         When RL is enabled, GridBandit proposes a second set of deltas
@@ -1254,8 +1254,9 @@ class MultiPairBot:
         contradiction defers to the heuristic until warmup is complete.
         """
         await asyncio.sleep(300)
+        if self.config.rl.enabled:
+            logger.info("RL-Optimizer aktiv — erste Optimierung in 5 Min")
         while self._running:
-            await asyncio.sleep(self.config.rl.eval_interval_hours * 3600)
             try:
                 pairs = list(self.pair_bots.keys())
                 if not pairs:
@@ -1373,6 +1374,7 @@ class MultiPairBot:
 
             except Exception as e:
                 logger.warning("Optimization loop error: %s", e)
+            await asyncio.sleep(self.config.rl.eval_interval_hours * 3600)
 
     def _merge_rl_heuristic(
         self, current: dict, heuristic: dict, rl_action: dict,
@@ -1667,9 +1669,11 @@ class MultiPairBot:
 
                 logger.info(
                     "Sentiment: score=%+.2f, conf=%.0f%%, source=%s, "
-                    "headlines=%d, regime_effect=%s",
+                    "headlines=%d, regime_effect=%s, provider=%s, has_key=%s",
                     signal.score, signal.confidence * 100,
                     signal.source, len(signal.headlines), effect,
+                    self.sentiment._provider,
+                    bool(self.sentiment._api_key),
                 )
 
                 if abs(signal.score) > 0.5 and self.cloud.connected:

@@ -96,24 +96,30 @@ class NewsSentiment:
         try:
             return await asyncio.to_thread(self._fetch_headlines_sync, pairs)
         except Exception as e:
-            logger.debug("Headline fetch failed: %s", e)
+            logger.warning("Headline fetch failed: %s", e)
             return []
 
     def _fetch_headlines_sync(self, pairs: list[str]) -> list[dict]:
         coins = ",".join(p.split("/")[0] for p in pairs)
-        url = f"{_CRYPTOCOMPARE}?categories={coins}&limit=15"
+        url = f"{_CRYPTOCOMPARE}?categories={coins}&limit=20"
         try:
-            resp = urlopen(url, timeout=8)
+            req = Request(url, headers={"User-Agent": "RichBot/2.0"})
+            resp = urlopen(req, timeout=10)
             data = _json.loads(resp.read().decode())
         except (URLError, HTTPError, OSError) as e:
-            logger.debug("CryptoCompare unreachable: %s", e)
+            logger.warning("CryptoCompare unreachable: %s", e)
             return []
 
-        cutoff = _time.time() - 4 * 3600
+        raw_items = data.get("Data", [])
+        if not raw_items:
+            logger.info("CryptoCompare: 0 Artikel fuer %s (Response-Type: %s)",
+                        coins, data.get("Type", "?"))
+
+        cutoff = _time.time() - 8 * 3600
         seen: set[str] = set()
         out: list[dict] = []
 
-        for item in data.get("Data", []):
+        for item in raw_items:
             title = (item.get("title") or "").strip()
             if not title or title in seen:
                 continue
@@ -135,7 +141,8 @@ class NewsSentiment:
         try:
             return await asyncio.to_thread(self._llm_call_sync, headlines)
         except Exception as e:
-            logger.debug("LLM classification failed, using keyword fallback: %s", e)
+            logger.warning("LLM classification failed (%s), using keyword fallback: %s",
+                           self._provider, e)
             return self._keyword_fallback(headlines)
 
     def _llm_call_sync(self, headlines: list[dict]) -> SentimentSignal:
