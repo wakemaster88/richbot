@@ -74,6 +74,8 @@ class PairBot:
         self.last_prediction: dict | None = None
         self._running = False
         self._grid_issue: str = ""
+        self._trail_cooldown_until: float = 0.0
+        self._sell_drain: list[tuple[float, float]] = []  # (timestamp, base_amount_sold)
 
         self.quote = pair.split("/")[1] if "/" in pair else "USDT"
         self.base = pair.split("/")[0] if "/" in pair else pair
@@ -81,6 +83,9 @@ class PairBot:
 
     def _on_fill(self, managed_order):
         """Handle order fill events."""
+        if managed_order.side == "sell":
+            self.record_sell_drain(managed_order.amount)
+
         trade = TradeRecord(
             timestamp=managed_order.fill_time,
             pair=self.pair,
@@ -288,11 +293,13 @@ class PairBot:
             self._grid_issue = "Nicht genug Kapital"
             return
 
+        rp_init = self.regime.get_grid_params()
         self.grid.calculate_grid(
             self.current_range, self.current_price, alloc.amount_per_order,
             buy_count=alloc.buy_count, sell_count=alloc.sell_count,
             buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
             step_size=step_size, min_amount=min_amount,
+            min_distance_pct=rp_init.min_distance_pct,
         )
 
         try:
@@ -322,6 +329,26 @@ class PairBot:
                  "rebalance": alloc.rebalance_needed},
             ))
 
+    def record_sell_drain(self, amount: float):
+        """Track base currency sold for drain protection."""
+        self._sell_drain.append((time.time(), amount))
+
+    def _recent_sell_volume(self, window_sec: int = 600) -> float:
+        """Total base sold in the last N seconds."""
+        cutoff = time.time() - window_sec
+        self._sell_drain = [(t, a) for t, a in self._sell_drain if t > cutoff]
+        return sum(a for _, a in self._sell_drain)
+
+    def is_sell_drain_active(self, current_base_balance: float) -> bool:
+        """True if we've sold > 60% of our starting base in the last 10 minutes."""
+        recent = self._recent_sell_volume(600)
+        if current_base_balance <= 0 and recent > 0:
+            return True
+        starting = current_base_balance + recent
+        if starting <= 0:
+            return False
+        return recent / starting > 0.60
+
     async def update_tick(self, price: float):
         """Process a price update."""
         self.current_price = price
@@ -346,8 +373,15 @@ class PairBot:
         if self.current_range:
             breakout = detect_range_breakout(price, self.current_range)
             if breakout:
+                now = time.time()
+                if now < self._trail_cooldown_until:
+                    return
+
                 logger.info("%s: Range breakout %s at %.2f", self.pair, breakout, price)
                 await self.order_mgr.cancel_all(self.pair)
+
+                rp = self.regime.get_grid_params()
+                self._trail_cooldown_until = now + rp.trail_cooldown_sec
 
                 new_range = shift_range(self.current_range, breakout)
                 self.current_range = new_range
@@ -358,7 +392,12 @@ class PairBot:
                     buy_budget=alloc.buy_budget if alloc else None,
                     sell_budget=alloc.sell_budget if alloc else None,
                     step_size=self.pair_step_size, min_amount=self.pair_min_amount,
+                    min_distance_pct=rp.min_distance_pct,
                 )
+
+                if rp.trail_cooldown_sec > 0:
+                    await asyncio.sleep(min(rp.trail_cooldown_sec, 15))
+
                 placed = await self.order_mgr.place_grid_orders(self.pair, self._entry_filter_dict())
 
                 if self.cloud and self.cloud.connected:
@@ -367,7 +406,9 @@ class PairBot:
                         {"direction": breakout, "price": price,
                          "new_range": [new_range.lower, new_range.upper],
                          "levels": len(self.grid.state.levels),
-                         "orders_placed": len(placed)},
+                         "orders_placed": len(placed),
+                         "min_distance_pct": rp.min_distance_pct,
+                         "trail_cooldown": rp.trail_cooldown_sec},
                     ))
 
                 await self.telegram.alert_range_shift(
@@ -449,9 +490,13 @@ class PairBot:
         except Exception as e:
             logger.error("Equity update failed for %s: %s", self.pair, e)
 
-    def _entry_filter_dict(self) -> dict:
+    def _entry_filter_dict(self, base_balance: float | None = None) -> dict:
         ef = self.regime.get_entry_filter()
-        return {"allow_buys": ef.allow_buys, "allow_sells": ef.allow_sells}
+        allow_sells = ef.allow_sells
+        if allow_sells and base_balance is not None and self.is_sell_drain_active(base_balance):
+            allow_sells = False
+            logger.warning("%s: Sell-Drain-Schutz aktiv — >60%% Base in 10 Min verkauft", self.pair)
+        return {"allow_buys": ef.allow_buys, "allow_sells": allow_sells}
 
     def get_status(self) -> dict:
         open_orders = self.order_mgr.get_open_orders(self.pair)
@@ -772,11 +817,13 @@ class MultiPairBot:
                                 pair, balance, price, len(self.pair_bots), min_notional, step_size,
                             )
                             bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
+                            rp_r = bot.regime.get_grid_params()
                             bot.grid.calculate_grid(
                                 new_range, price, alloc.amount_per_order,
                                 buy_count=alloc.buy_count, sell_count=alloc.sell_count,
                                 buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
                                 step_size=step_size, min_amount=min_amount,
+                                min_distance_pct=rp_r.min_distance_pct,
                             )
                             await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                         else:
@@ -1364,11 +1411,13 @@ class MultiPairBot:
                     bot.grid.spacing_percent *= rp.spacing_mult
 
                     await bot.order_mgr.cancel_all(pair)
+                    rp_a = bot.regime.get_grid_params()
                     bot.grid.calculate_grid(
                         bot.current_range, price, alloc.amount_per_order,
                         buy_count=alloc.buy_count, sell_count=alloc.sell_count,
                         buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
                         step_size=step_size, min_amount=min_amount,
+                        min_distance_pct=rp_a.min_distance_pct,
                     )
                     await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
 
@@ -1639,11 +1688,13 @@ class MultiPairBot:
                             )
                             bot.apply_allocation(alloc, step_size=step_size, min_amount=min_amount)
                             await bot.order_mgr.cancel_all(pair)
+                            rp_c = bot.regime.get_grid_params()
                             bot.grid.calculate_grid(
                                 bot.current_range, bot.current_price, alloc.amount_per_order,
                                 buy_count=alloc.buy_count, sell_count=alloc.sell_count,
                                 buy_budget=alloc.buy_budget, sell_budget=alloc.sell_budget,
                                 step_size=step_size, min_amount=min_amount,
+                                min_distance_pct=rp_c.min_distance_pct,
                             )
                             await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                             actual = len(bot.grid.state.levels)

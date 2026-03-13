@@ -131,11 +131,14 @@ class GridEngine:
                     budget: float | None = None,
                     budget_is_quote: bool = True,
                     step_size: float = 0.00001,
-                    min_amount: float = 0.0) -> list[GridLevel]:
+                    min_amount: float = 0.0,
+                    min_distance: float = 0.0) -> list[GridLevel]:
         """Build levels for one side of the grid.
 
         If budget is provided, uses pyramid sizing to distribute capital.
         Otherwise falls back to uniform `amount` per level.
+        min_distance: minimum price distance from current_price for the
+                      closest level (prevents instant fills).
         """
         if count <= 0 or span <= 0:
             return []
@@ -160,17 +163,33 @@ class GridEngine:
         else:
             amounts = [amount] * count
 
+        safe_dist = max(min_distance, min_spacing)
+
         levels: list[GridLevel] = []
+        seen_prices: set[float] = set()
         for i, w in enumerate(pos_weights):
             if side == "buy":
                 price = current_price - span * w
             else:
                 price = current_price + span * w
 
-            if levels and abs(price - levels[-1].price) < min_spacing:
+            rounded = round(price, 2)
+
+            dist_from_current = abs(rounded - current_price)
+            if dist_from_current < safe_dist:
+                if side == "buy":
+                    rounded = round(current_price - safe_dist - min_spacing * i, 2)
+                else:
+                    rounded = round(current_price + safe_dist + min_spacing * i, 2)
+
+            if rounded in seen_prices:
                 continue
+            if levels and abs(rounded - levels[-1].price) < min_spacing:
+                continue
+
+            seen_prices.add(rounded)
             lvl_amount = amounts[i] if i < len(amounts) else amounts[-1]
-            levels.append(GridLevel(price=round(price, 2), side=side, amount=lvl_amount, index=i))
+            levels.append(GridLevel(price=rounded, side=side, amount=lvl_amount, index=i))
 
         return levels
 
@@ -181,7 +200,8 @@ class GridEngine:
                        buy_budget: float | None = None,
                        sell_budget: float | None = None,
                        step_size: float = 0.00001,
-                       min_amount: float = 0.0) -> list[GridLevel]:
+                       min_amount: float = 0.0,
+                       min_distance_pct: float = 0.0) -> list[GridLevel]:
         """Calculate grid levels with asymmetric counts and pyramid sizing.
 
         Args:
@@ -189,6 +209,7 @@ class GridEngine:
             sell_budget: base currency available for sell orders (enables pyramid sizing)
             step_size: exchange quantity precision for rounding
             min_amount: minimum order amount (min_notional / price, rounded)
+            min_distance_pct: minimum % distance from current price for closest order
         """
         self.state.range_result = range_result
         self.state.last_price = current_price
@@ -203,6 +224,8 @@ class GridEngine:
             sell_count = max(0, self.grid_count - buy_count)
 
         min_spacing = self._min_fee_spacing(current_price)
+        min_distance = current_price * max(min_distance_pct, self.FEE_RATE * 2 * self.MIN_SPACING_VS_FEE) / 100 \
+            if min_distance_pct > 0 else min_spacing
 
         buy_span_needed = max(buy_count, 1) * min_spacing * 1.15 if buy_count > 0 else 0
         sell_span_needed = max(sell_count, 1) * min_spacing * 1.15 if sell_count > 0 else 0
@@ -232,19 +255,19 @@ class GridEngine:
         buy_levels = self._build_side(
             "buy", buy_count, current_price, buy_span, amount, min_spacing,
             use_linear=False, budget=buy_budget, budget_is_quote=True,
-            step_size=step_size, min_amount=min_amount,
+            step_size=step_size, min_amount=min_amount, min_distance=min_distance,
         )
         sell_levels = self._build_side(
             "sell", sell_count, current_price, sell_span, amount, min_spacing,
             use_linear=False, budget=sell_budget, budget_is_quote=False,
-            step_size=step_size, min_amount=min_amount,
+            step_size=step_size, min_amount=min_amount, min_distance=min_distance,
         )
 
         if len(buy_levels) < buy_count:
             linear_buys = self._build_side(
                 "buy", buy_count, current_price, buy_span, amount, min_spacing,
                 use_linear=True, budget=buy_budget, budget_is_quote=True,
-                step_size=step_size, min_amount=min_amount,
+                step_size=step_size, min_amount=min_amount, min_distance=min_distance,
             )
             if len(linear_buys) > len(buy_levels):
                 buy_levels = linear_buys
@@ -252,7 +275,7 @@ class GridEngine:
             linear_sells = self._build_side(
                 "sell", sell_count, current_price, sell_span, amount, min_spacing,
                 use_linear=True, budget=sell_budget, budget_is_quote=False,
-                step_size=step_size, min_amount=min_amount,
+                step_size=step_size, min_amount=min_amount, min_distance=min_distance,
             )
             if len(linear_sells) > len(sell_levels):
                 sell_levels = linear_sells
@@ -300,7 +323,8 @@ class GridEngine:
                    buy_budget: float | None = None,
                    sell_budget: float | None = None,
                    step_size: float = 0.00001,
-                   min_amount: float = 0.0) -> list[GridLevel]:
+                   min_amount: float = 0.0,
+                   min_distance_pct: float = 0.0) -> list[GridLevel]:
         """Trail the grid in the given direction by recalculating."""
         self.state.shift_count += 1
         logger.info(
@@ -312,6 +336,7 @@ class GridEngine:
             buy_count=buy_count, sell_count=sell_count,
             buy_budget=buy_budget, sell_budget=sell_budget,
             step_size=step_size, min_amount=min_amount,
+            min_distance_pct=min_distance_pct,
         )
 
     def mark_filled(self, order_id: str) -> GridLevel | None:

@@ -48,6 +48,7 @@ class OrderManager:
         self._paused_levels: set[str] = set()  # level_ids paused due to balance issues
         self._pause_until: float = 0  # timestamp until retries are suppressed
         self._last_filter_log: tuple[bool, bool] = (True, True)  # track to log once on change
+        self._placing_lock = asyncio.Lock()
 
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
@@ -70,10 +71,14 @@ class OrderManager:
                                 entry_filter: dict | None = None) -> list[ManagedOrder]:
         """Place all pending grid orders.
 
-        Args:
-            entry_filter: Optional dict with allow_buys/allow_sells booleans
-                          from the regime detector.
+        Uses an async lock to prevent concurrent placement (race between
+        _poll_loop, _auto_adjust_grid, and update_tick).
         """
+        async with self._placing_lock:
+            return await self._place_grid_orders_inner(symbol, entry_filter)
+
+    async def _place_grid_orders_inner(self, symbol: str,
+                                       entry_filter: dict | None = None) -> list[ManagedOrder]:
         can_trade, reason = self.risk.can_trade()
         if not can_trade:
             logger.warning("Trading paused: %s", reason)
@@ -115,7 +120,7 @@ class OrderManager:
         existing_sigs: set[str] = set()
         for o in self.orders.values():
             if o.status == "open" and o.symbol == symbol:
-                existing_sigs.add(f"{o.side}_{o.price:.8f}_{o.amount:.8f}")
+                existing_sigs.add(f"{o.side}_{o.price:.8f}")
 
         levels = self.grid.get_levels_to_place(sides_allowed=sides_allowed)
         placed = []
@@ -130,8 +135,10 @@ class OrderManager:
                 self.last_fail_reason = f"Max offene Orders ({MAX_OPEN_ORDERS})"
                 break
 
-            sig = f"{level.side}_{level.price:.8f}_{level.amount:.8f}"
-            if sig in existing_sigs:
+            price_sig = f"{level.side}_{level.price:.8f}"
+            if price_sig in existing_sigs:
+                level.order_id = "__dup_skipped__"
+                logger.debug("Duplikat uebersprungen: %s @ %.2f", level.side, level.price)
                 continue
             try:
                 if level.side == "buy":
@@ -155,7 +162,7 @@ class OrderManager:
                 self.orders[order["id"]] = managed
                 placed.append(managed)
                 open_count += 1
-                existing_sigs.add(sig)
+                existing_sigs.add(price_sig)
 
                 self.risk.add_trailing_stop(level.level_id, level.side, level.price, pair=symbol)
 

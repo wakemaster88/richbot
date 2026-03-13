@@ -28,10 +28,12 @@ class Regime(Enum):
 class RegimeParams:
     """Parameters that adapt the trading strategy to the current regime."""
     regime: Regime
-    target_ratio: float   # target USDC fraction of total equity
-    spacing_mult: float   # multiplier for grid spacing
-    size_mult: float      # multiplier for order sizes
-    max_levels: int | None  # cap on grid levels (None = no cap)
+    target_ratio: float       # target USDC fraction of total equity
+    spacing_mult: float       # multiplier for grid spacing
+    size_mult: float          # multiplier for order sizes
+    max_levels: int | None    # cap on grid levels (None = no cap)
+    min_distance_pct: float = 0.0  # min % distance from price for closest order
+    trail_cooldown_sec: int = 0    # seconds to wait after grid trail before placing
 
 
 @dataclass
@@ -46,18 +48,22 @@ _REGIME_PARAMS: dict[Regime, RegimeParams] = {
     Regime.RANGING: RegimeParams(
         regime=Regime.RANGING,
         target_ratio=0.50, spacing_mult=1.0, size_mult=1.0, max_levels=None,
+        min_distance_pct=0.15, trail_cooldown_sec=0,
     ),
     Regime.TREND_UP: RegimeParams(
         regime=Regime.TREND_UP,
-        target_ratio=0.30, spacing_mult=1.3, size_mult=0.8, max_levels=None,
+        target_ratio=0.30, spacing_mult=1.8, size_mult=0.7, max_levels=None,
+        min_distance_pct=0.40, trail_cooldown_sec=30,
     ),
     Regime.TREND_DOWN: RegimeParams(
         regime=Regime.TREND_DOWN,
-        target_ratio=0.70, spacing_mult=1.3, size_mult=0.6, max_levels=None,
+        target_ratio=0.70, spacing_mult=1.8, size_mult=0.5, max_levels=None,
+        min_distance_pct=0.40, trail_cooldown_sec=30,
     ),
     Regime.VOLATILE: RegimeParams(
         regime=Regime.VOLATILE,
-        target_ratio=0.50, spacing_mult=2.0, size_mult=0.5, max_levels=4,
+        target_ratio=0.50, spacing_mult=2.5, size_mult=0.4, max_levels=4,
+        min_distance_pct=0.50, trail_cooldown_sec=60,
     ),
 }
 
@@ -156,10 +162,10 @@ class RegimeDetector:
             return EntryFilter(allow_buys=True, allow_sells=True, rsi_value=rsi)
 
         if r == Regime.TREND_UP:
-            return EntryFilter(allow_buys=True, allow_sells=(rsi > 60), rsi_value=rsi)
+            return EntryFilter(allow_buys=True, allow_sells=(rsi > 72), rsi_value=rsi)
 
         if r == Regime.TREND_DOWN:
-            return EntryFilter(allow_buys=(rsi < 40), allow_sells=True, rsi_value=rsi)
+            return EntryFilter(allow_buys=(rsi < 28), allow_sells=True, rsi_value=rsi)
 
         # VOLATILE
         return EntryFilter(allow_buys=(rsi < 30), allow_sells=(rsi > 70), rsi_value=rsi)
