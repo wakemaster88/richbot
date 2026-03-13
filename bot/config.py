@@ -101,6 +101,17 @@ class CloudConfig:
 
 
 @dataclass
+class SentimentConfig:
+    """News-sentiment analysis configuration."""
+    enabled: bool = False
+    provider: str = "grok"
+    api_key: str = ""
+    fetch_interval: int = 900
+    cache_validity: int = 1800
+    weight: float = 0.30
+
+
+@dataclass
 class PiConfig:
     """Raspberry Pi specific resource limits."""
     enabled: bool = False
@@ -133,6 +144,7 @@ class BotConfig:
     websocket: WebSocketConfig = field(default_factory=WebSocketConfig)
     pi: PiConfig = field(default_factory=PiConfig)
     cloud: CloudConfig = field(default_factory=CloudConfig)
+    sentiment: SentimentConfig = field(default_factory=SentimentConfig)
     logging_cfg: LoggingConfig = field(default_factory=LoggingConfig)
     db_path: str = "data/richbot.db"
     log_level: str = "INFO"
@@ -179,6 +191,8 @@ class BotConfig:
             cfg.pi = PiConfig(**data["pi"])
         if "cloud" in data:
             cfg.cloud = CloudConfig(**data["cloud"])
+        if "sentiment" in data:
+            cfg.sentiment = SentimentConfig(**data["sentiment"])
         return cfg
 
     def to_dict(self) -> dict[str, Any]:
@@ -202,6 +216,9 @@ def _apply_env_overrides(cfg: BotConfig) -> BotConfig:
     env_map["NEON_DATABASE_URL"] = lambda v: setattr(cfg.cloud, "database_url", v)
     env_map["CLOUD_BOT_ID"] = lambda v: setattr(cfg.cloud, "bot_id", v)
     env_map["CLOUD_ENABLED"] = lambda v: setattr(cfg.cloud, "enabled", v.lower() == "true")
+    env_map["SENTIMENT_API_KEY"] = lambda v: setattr(cfg.sentiment, "api_key", v)
+    env_map["SENTIMENT_PROVIDER"] = lambda v: setattr(cfg.sentiment, "provider", v)
+    env_map["SENTIMENT_ENABLED"] = lambda v: setattr(cfg.sentiment, "enabled", v.lower() == "true")
     for env_key, setter in env_map.items():
         val = os.environ.get(env_key)
         if val:
