@@ -23,13 +23,25 @@ class ManagedOrder:
     price: float
     amount: float
     grid_level: GridLevel
-    status: str = "open"  # open, filled, cancelled
+    status: str = "open"  # open, partially_filled, filled, cancelled
     fill_price: float = 0.0
     fill_time: float = 0.0
     pnl: float = 0.0
     slippage: float = 0.0
     actual_fee: float = 0.0
     is_maker: bool = True
+    filled_amount: float = 0.0
+    remaining_amount: float = 0.0
+    fills: list = field(default_factory=list)
+    _partial_first_seen: float = 0.0
+
+    def __post_init__(self):
+        if self.remaining_amount == 0.0:
+            self.remaining_amount = self.amount
+
+    @property
+    def fill_pct(self) -> float:
+        return self.filled_amount / self.amount * 100 if self.amount > 0 else 0.0
 
 
 class OrderManager:
@@ -45,6 +57,7 @@ class OrderManager:
         self.config = config
         self.orders: dict[str, ManagedOrder] = {}
         self._fill_callbacks: list = []
+        self._partial_fill_callbacks: list = []
         self._round_trips: dict[int, float] = {}  # grid_index -> buy_price
         self._round_trips_fee: dict[int, float] = {}  # grid_index -> buy_fee
         self.last_fail_reason: str = ""
@@ -57,6 +70,10 @@ class OrderManager:
     def on_fill(self, callback):
         """Register a callback for fill events: callback(managed_order)."""
         self._fill_callbacks.append(callback)
+
+    def on_partial_fill(self, callback):
+        """Register a callback for partial fill events: callback(managed_order)."""
+        self._partial_fill_callbacks.append(callback)
 
     @staticmethod
     def create_managed(order_id: str, symbol: str, level: GridLevel) -> ManagedOrder:
@@ -197,10 +214,10 @@ class OrderManager:
         return placed
 
     async def cancel_all(self, symbol: str):
-        """Cancel all open orders for a symbol."""
+        """Cancel all open/partially_filled orders for a symbol."""
         cancelled = 0
         for oid, order in list(self.orders.items()):
-            if order.symbol == symbol and order.status == "open":
+            if order.symbol == symbol and order.status in ("open", "partially_filled"):
                 try:
                     await self.exchange.async_cancel_order(oid, symbol)
                     order.status = "cancelled"
@@ -210,21 +227,30 @@ class OrderManager:
         self.reset_paused_levels()
         logger.info("Cancelled %d orders for %s", cancelled, symbol)
 
+    PARTIAL_FILL_COMPLETE_PCT = 80.0
+    PARTIAL_FILL_STALE_PCT = 20.0
+    PARTIAL_FILL_STALE_SEC = 300.0
+
     async def _fetch_real_fill_price(self, managed: ManagedOrder) -> None:
         """Fetch actual fill price via Exchange API and compute slippage."""
         try:
             detail = await self.exchange.async_fetch_order(managed.symbol, managed.order_id)
-            if detail.get("executed_qty", 0) > 0:
+            exec_qty = detail.get("executed_qty", 0)
+            if exec_qty > 0:
                 managed.fill_price = detail["avg_price"]
+                managed.filled_amount = exec_qty
+                managed.remaining_amount = managed.amount - exec_qty
         except Exception as e:
             logger.debug("fetch_order fallback for %s: %s", managed.order_id, e)
-            managed.fill_price = managed.price
+            if managed.fill_price == 0:
+                managed.fill_price = managed.price
 
         try:
             trades = await self.exchange.async_fetch_my_trades(managed.symbol, managed.order_id)
             if trades:
                 total_commission = 0.0
                 maker_fills = 0
+                managed.fills = []
                 for t in trades:
                     if t["commission_asset"] == managed.symbol.split("/")[1]:
                         total_commission += t["commission"]
@@ -232,6 +258,11 @@ class OrderManager:
                         total_commission += t["commission"] * t["price"]
                     if t["is_maker"]:
                         maker_fills += 1
+                    managed.fills.append({
+                        "price": t["price"], "qty": t["qty"],
+                        "commission": t["commission"],
+                        "is_maker": t["is_maker"],
+                    })
                 managed.actual_fee = total_commission
                 managed.is_maker = maker_fills > len(trades) / 2
         except Exception as e:
@@ -240,39 +271,158 @@ class OrderManager:
         if managed.price > 0:
             managed.slippage = abs(managed.fill_price - managed.price) / managed.price
 
+    async def _fetch_order_status(self, managed: ManagedOrder) -> dict | None:
+        """Fetch current order status from exchange. Returns detail dict or None."""
+        try:
+            return await self.exchange.async_fetch_order(managed.symbol, managed.order_id)
+        except Exception as e:
+            logger.debug("fetch_order_status failed for %s: %s", managed.order_id, e)
+            return None
+
+    def _finalize_fill(self, managed: ManagedOrder) -> None:
+        """Finalize a fully filled order: mark grid, compute PnL, fire callbacks."""
+        managed.status = "filled"
+        managed.filled_amount = managed.amount
+        managed.remaining_amount = 0.0
+
+        self.grid.mark_filled(managed.order_id)
+        level = managed.grid_level
+        level.partial_fills.append((managed.fill_time, managed.fill_price, managed.filled_amount))
+
+        pnl = self._calculate_pnl(managed)
+        managed.pnl = pnl
+        self.risk.record_trade(pnl)
+
+        for cb in self._fill_callbacks:
+            try:
+                cb(managed)
+            except Exception as e:
+                logger.error("Fill callback error: %s", e)
+
+        slip_bps = managed.slippage * 10_000
+        logger.info(
+            "Fill detected: %s %s @ %.2f (limit: %.2f, slip: %.1fbps, fee: %.6f, PnL: %.4f)",
+            managed.side, managed.symbol, managed.fill_price, managed.price,
+            slip_bps, managed.actual_fee, pnl,
+        )
+
+    def _handle_partial_completion(self, managed: ManagedOrder) -> None:
+        """Treat a partial fill >= threshold as complete."""
+        managed.fill_time = time.time()
+        managed.amount = managed.filled_amount
+        managed.remaining_amount = 0.0
+        logger.info(
+            "Partial fill >= %.0f%% treated as complete: %s %s %.6f/%.6f @ %.2f",
+            self.PARTIAL_FILL_COMPLETE_PCT, managed.side, managed.symbol,
+            managed.filled_amount, managed.amount, managed.fill_price,
+        )
+        self._finalize_fill(managed)
+
     async def check_fills(self, symbol: str) -> list[ManagedOrder]:
-        """Poll for filled orders (used when WebSocket is not available)."""
+        """Poll for filled orders with partial-fill awareness."""
         filled = []
         try:
             open_orders = await self.exchange.async_fetch_open_orders(symbol)
             open_ids = {o["id"] for o in open_orders}
 
             for oid, managed in list(self.orders.items()):
-                if managed.status == "open" and managed.symbol == symbol and oid not in open_ids:
-                    managed.status = "filled"
-                    managed.fill_time = time.time()
+                if managed.symbol != symbol:
+                    continue
+                if managed.status not in ("open", "partially_filled"):
+                    continue
 
+                still_open = oid in open_ids
+
+                if still_open:
+                    detail = await self._fetch_order_status(managed)
+                    if detail is None:
+                        continue
+                    exec_qty = detail.get("executed_qty", 0)
+                    if exec_qty <= 0:
+                        continue
+
+                    managed.filled_amount = exec_qty
+                    managed.remaining_amount = managed.amount - exec_qty
+                    managed.fill_price = detail["avg_price"]
+
+                    fill_pct = managed.fill_pct
+
+                    if managed.status == "open":
+                        managed.status = "partially_filled"
+                        managed._partial_first_seen = time.time()
+                        managed.grid_level.partial_fills.append(
+                            (time.time(), detail["avg_price"], exec_qty)
+                        )
+                        logger.info(
+                            "Partial fill: %s %s %.6f/%.6f (%.1f%%) @ %.2f",
+                            managed.side, symbol, exec_qty, managed.amount,
+                            fill_pct, managed.fill_price,
+                        )
+                        for cb in self._partial_fill_callbacks:
+                            try:
+                                cb(managed)
+                            except Exception:
+                                pass
+
+                    if fill_pct >= self.PARTIAL_FILL_COMPLETE_PCT:
+                        try:
+                            await self.exchange.async_cancel_order(oid, symbol)
+                        except Exception as e:
+                            logger.debug("Cancel rest of partial %s: %s", oid, e)
+                        await self._fetch_real_fill_price(managed)
+                        self._handle_partial_completion(managed)
+                        filled.append(managed)
+
+                    elif (fill_pct < self.PARTIAL_FILL_STALE_PCT
+                          and managed._partial_first_seen > 0
+                          and time.time() - managed._partial_first_seen > self.PARTIAL_FILL_STALE_SEC):
+                        logger.info(
+                            "Stale partial (<%.0f%% after %ds): cancel+replace %s %s",
+                            self.PARTIAL_FILL_STALE_PCT,
+                            int(self.PARTIAL_FILL_STALE_SEC),
+                            managed.side, symbol,
+                        )
+                        try:
+                            await self.exchange.async_cancel_order(oid, symbol)
+                        except Exception as e:
+                            logger.warning("Cancel stale partial %s: %s", oid, e)
+                            continue
+
+                        if managed.filled_amount > 0:
+                            await self._fetch_real_fill_price(managed)
+                            managed.amount = managed.filled_amount
+                            managed.remaining_amount = 0.0
+                            managed.fill_time = time.time()
+                            self._finalize_fill(managed)
+                            filled.append(managed)
+
+                        level = managed.grid_level
+                        remaining = level.amount - managed.filled_amount
+                        if remaining > 0:
+                            level.order_id = None
+                            level.amount = remaining
+                            logger.info(
+                                "Re-queueing remaining %.6f for %s @ %.2f",
+                                remaining, level.side, level.price,
+                            )
+
+                else:
+                    managed.fill_time = time.time()
                     await self._fetch_real_fill_price(managed)
 
-                    self.grid.mark_filled(oid)
-
-                    pnl = self._calculate_pnl(managed)
-                    managed.pnl = pnl
-                    self.risk.record_trade(pnl)
+                    if managed.filled_amount > 0 and managed.filled_amount < managed.amount:
+                        if managed.fill_pct >= self.PARTIAL_FILL_COMPLETE_PCT:
+                            self._handle_partial_completion(managed)
+                        else:
+                            managed.amount = managed.filled_amount
+                            managed.remaining_amount = 0.0
+                            self._finalize_fill(managed)
+                    else:
+                        managed.filled_amount = managed.amount
+                        managed.remaining_amount = 0.0
+                        self._finalize_fill(managed)
 
                     filled.append(managed)
-                    for cb in self._fill_callbacks:
-                        try:
-                            cb(managed)
-                        except Exception as e:
-                            logger.error("Fill callback error: %s", e)
-
-                    slip_bps = managed.slippage * 10_000
-                    logger.info(
-                        "Fill detected: %s %s @ %.2f (limit: %.2f, slip: %.1fbps, fee: %.6f, PnL: %.4f)",
-                        managed.side, symbol, managed.fill_price, managed.price,
-                        slip_bps, managed.actual_fee, pnl,
-                    )
 
         except Exception as e:
             logger.error("Error checking fills: %s", e)
@@ -283,66 +433,107 @@ class OrderManager:
         return filled
 
     def process_ws_fill(self, order_data: dict) -> ManagedOrder | None:
-        """Process a fill event from WebSocket (sync — no API lookups).
+        """Process a fill event from WebSocket.
 
-        Uses data from the executionReport: avg_price from cumQuoteQty/cumQty,
-        plus commission fields. The async enrichment path
-        (async_enrich_ws_fill) can be called afterward for full accuracy.
+        Handles both PARTIALLY_FILLED and FILLED statuses.
+        Returns the ManagedOrder only when it's fully filled (or treated as such).
+        For partial fills, updates internal state and fires partial callbacks.
         """
         oid = order_data.get("id", "")
         if oid not in self.orders:
             return None
 
         managed = self.orders[oid]
-        if managed.status != "open":
+        if managed.status == "filled":
             return None
 
-        managed.status = "filled"
-        managed.fill_time = time.time()
-
+        order_status = order_data.get("order_status", "FILLED")
         cum_quote = float(order_data.get("cum_quote_qty", 0))
         cum_qty = float(order_data.get("cum_qty", 0))
+        last_qty = float(order_data.get("last_qty", 0))
+        last_price = float(order_data.get("last_price", 0))
+
         if cum_quote > 0 and cum_qty > 0:
             managed.fill_price = cum_quote / cum_qty
         else:
             managed.fill_price = float(order_data.get("price", managed.price))
 
+        managed.filled_amount = cum_qty if cum_qty > 0 else managed.amount
+        managed.remaining_amount = managed.amount - managed.filled_amount
+
+        if last_qty > 0 and last_price > 0:
+            managed.fills.append({
+                "price": last_price, "qty": last_qty,
+                "time": time.time(),
+            })
+            managed.grid_level.partial_fills.append(
+                (time.time(), last_price, last_qty)
+            )
+
         ws_commission = float(order_data.get("commission", 0))
         if ws_commission > 0:
             comm_asset = order_data.get("commission_asset", "")
             if comm_asset == managed.symbol.split("/")[1]:
-                managed.actual_fee = ws_commission
+                managed.actual_fee += ws_commission
             else:
-                managed.actual_fee = ws_commission * managed.fill_price
+                managed.actual_fee += ws_commission * managed.fill_price
 
         managed.is_maker = order_data.get("is_maker", True)
 
         if managed.price > 0:
             managed.slippage = abs(managed.fill_price - managed.price) / managed.price
 
-        managed.pnl = self._calculate_pnl(managed)
+        is_full = order_status == "FILLED"
+        is_near_complete = managed.fill_pct >= self.PARTIAL_FILL_COMPLETE_PCT
 
-        self.grid.mark_filled(oid)
-        self.risk.record_trade(managed.pnl)
+        if is_full or is_near_complete:
+            managed.status = "filled"
+            managed.fill_time = time.time()
+            if not is_full:
+                managed.amount = managed.filled_amount
+                managed.remaining_amount = 0.0
 
-        for cb in self._fill_callbacks:
+            managed.pnl = self._calculate_pnl(managed)
+            self.grid.mark_filled(oid)
+            self.risk.record_trade(managed.pnl)
+
+            for cb in self._fill_callbacks:
+                try:
+                    cb(managed)
+                except Exception as e:
+                    logger.error("Fill callback error: %s", e)
+
+            return managed
+
+        managed.status = "partially_filled"
+        if managed._partial_first_seen == 0:
+            managed._partial_first_seen = time.time()
+        logger.info(
+            "WS partial fill: %s %s %.6f/%.6f (%.1f%%) @ %.2f",
+            managed.side, managed.symbol, managed.filled_amount,
+            managed.amount, managed.fill_pct, managed.fill_price,
+        )
+        for cb in self._partial_fill_callbacks:
             try:
                 cb(managed)
-            except Exception as e:
-                logger.error("Fill callback error: %s", e)
-
-        return managed
+            except Exception:
+                pass
+        return None
 
     async def async_enrich_ws_fill(self, managed: ManagedOrder) -> None:
         """Post-WS enrichment: fetch real fill details from REST API."""
+        if managed.status != "filled":
+            return
         await self._fetch_real_fill_price(managed)
         managed.pnl = self._calculate_pnl(managed)
 
     def _calculate_pnl(self, order: ManagedOrder) -> float:
         """Calculate realized PnL for a filled grid order.
-        Uses actual exchange fees when available, otherwise estimates."""
+        Uses actual exchange fees when available, otherwise estimates.
+        Uses filled_amount (may differ from original amount on partial fills)."""
+        qty = order.filled_amount if order.filled_amount > 0 else order.amount
         fee = order.actual_fee if order.actual_fee > 0 else (
-            order.fill_price * order.amount * self.FEE_RATE
+            order.fill_price * qty * self.FEE_RATE
         )
         idx = order.grid_level.index
 
@@ -353,7 +544,7 @@ class OrderManager:
 
         buy_price = self._round_trips.pop(idx, None)
         if buy_price is not None:
-            gross = (order.fill_price - buy_price) * order.amount
+            gross = (order.fill_price - buy_price) * qty
             buy_fee = self._round_trips_fee.pop(idx, fee)
             return gross - buy_fee - fee
         return -fee
@@ -363,7 +554,7 @@ class OrderManager:
         return self.risk.check_trailing_stops(current_price, pair=pair)
 
     def get_open_orders(self, symbol: str | None = None) -> list[ManagedOrder]:
-        orders = [o for o in self.orders.values() if o.status == "open"]
+        orders = [o for o in self.orders.values() if o.status in ("open", "partially_filled")]
         if symbol:
             orders = [o for o in orders if o.symbol == symbol]
         return orders
@@ -377,6 +568,9 @@ class OrderManager:
     def get_stats(self, symbol: str | None = None) -> dict:
         open_orders = self.get_open_orders(symbol)
         filled = self.get_filled_orders(symbol)
+        partial = [o for o in self.orders.values()
+                   if o.status == "partially_filled"
+                   and (symbol is None or o.symbol == symbol)]
         total_pnl = sum(o.pnl for o in filled)
 
         slippages = [o.slippage for o in filled if o.slippage > 0]
@@ -389,6 +583,7 @@ class OrderManager:
         return {
             "open_orders": len(open_orders),
             "filled_orders": len(filled),
+            "partially_filled": len(partial),
             "total_pnl": total_pnl,
             "buy_fills": len([o for o in filled if o.side == "buy"]),
             "sell_fills": len([o for o in filled if o.side == "sell"]),

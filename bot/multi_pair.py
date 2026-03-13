@@ -87,19 +87,22 @@ class PairBot:
         self.order_mgr.on_fill(self._on_fill)
 
     def _on_fill(self, managed_order):
-        """Handle order fill events."""
+        """Handle order fill events (full or partial-treated-as-full)."""
+        fill_qty = managed_order.filled_amount if managed_order.filled_amount > 0 else managed_order.amount
+
         if managed_order.side == "sell":
-            self.record_sell_drain(managed_order.amount)
+            self.record_sell_drain(fill_qty)
 
         actual_fee = managed_order.actual_fee if managed_order.actual_fee > 0 else (
-            managed_order.fill_price * managed_order.amount * OrderManager.FEE_RATE
+            managed_order.fill_price * fill_qty * OrderManager.FEE_RATE
         )
+        was_partial = len(managed_order.fills) > 1 or managed_order.fill_pct < 100
         trade = TradeRecord(
             timestamp=managed_order.fill_time,
             pair=self.pair,
             side=managed_order.side,
             price=managed_order.grid_level.price,
-            amount=managed_order.amount,
+            amount=fill_qty,
             fee=actual_fee,
             pnl=managed_order.pnl,
             grid_level=managed_order.grid_level.price,
@@ -115,22 +118,25 @@ class PairBot:
         asyncio.create_task(
             self.telegram.alert_fill(
                 self.pair, managed_order.side, managed_order.fill_price,
-                managed_order.amount, managed_order.pnl,
+                fill_qty, managed_order.pnl,
             )
         )
 
         if self.cloud and self.cloud.connected:
             asyncio.create_task(self.cloud.sync_trade(trade))
             summary = self.tracker.get_summary(self.pair)
-            value = managed_order.fill_price * managed_order.amount
+            value = managed_order.fill_price * fill_qty
             asyncio.create_task(self.cloud.log_event(
                 "trade", f"{'Kauf' if managed_order.side == 'buy' else 'Verkauf'} {self.pair} @ {managed_order.fill_price:.2f}",
                 {"side": managed_order.side, "price": managed_order.fill_price,
                  "limit_price": managed_order.price,
-                 "amount": managed_order.amount, "value": round(value, 4),
+                 "amount": fill_qty, "value": round(value, 4),
                  "fee": round(actual_fee, 6), "pnl": managed_order.pnl,
                  "slippage_bps": round(slip_bps, 2),
                  "is_maker": managed_order.is_maker,
+                 "partial_fill": was_partial,
+                 "fill_pct": round(managed_order.fill_pct, 1),
+                 "num_fills": len(managed_order.fills),
                  "cum_pnl": round(summary["realized_pnl"], 4),
                  "trade_nr": summary["trade_count"],
                  "win": managed_order.pnl > 0},
@@ -444,13 +450,17 @@ class PairBot:
                 )
 
     async def update_fill(self, order_data: dict):
-        """Process a fill from WebSocket."""
+        """Process a fill from WebSocket. Only place opposite when fully filled."""
         managed = self.order_mgr.process_ws_fill(order_data)
-        if managed:
+        if managed and managed.status == "filled":
             asyncio.create_task(self.order_mgr.async_enrich_ws_fill(managed))
 
             opposite = self.grid.get_opposite_level(managed.grid_level)
             if opposite:
+                fill_qty = managed.filled_amount if managed.filled_amount > 0 else managed.amount
+                if fill_qty < managed.grid_level.amount:
+                    opposite.amount = fill_qty
+
                 try:
                     if opposite.side == "buy":
                         order = await self.exchange.async_create_limit_buy(
@@ -537,9 +547,15 @@ class PairBot:
     def get_status(self) -> dict:
         open_orders = self.order_mgr.get_open_orders(self.pair)
         orders_list = [
-            {"side": o.side, "price": o.price, "amount": o.amount, "id": o.order_id}
+            {
+                "side": o.side, "price": o.price, "amount": o.amount,
+                "id": o.order_id, "status": o.status,
+                "fill_pct": round(o.fill_pct, 1) if o.status == "partially_filled" else 100 if o.status == "filled" else 0,
+                "filled_amount": o.filled_amount,
+            }
             for o in sorted(open_orders, key=lambda x: x.price)
         ]
+        partial_count = sum(1 for o in open_orders if o.status == "partially_filled")
         unplaced = len(self.grid.get_levels_to_place())
         alloc = self.last_allocation
 
@@ -559,6 +575,7 @@ class PairBot:
             "grid_buy_count": self.pair_buy_count,
             "grid_sell_count": self.pair_sell_count,
             "active_orders": len(open_orders),
+            "partially_filled_orders": partial_count,
             "filled_orders": len(self.order_mgr.get_filled_orders(self.pair)),
             "unplaced_orders": unplaced,
             "grid_issue": self._grid_issue if unplaced > 0 else "",
@@ -1027,11 +1044,15 @@ class MultiPairBot:
 
                     filled = await bot.order_mgr.check_fills(pair)
                     for managed in filled:
+                        fill_qty = managed.filled_amount if managed.filled_amount > 0 else managed.amount
                         opposite = bot.grid.get_opposite_level(managed.grid_level)
+                        if opposite:
+                            if fill_qty < managed.grid_level.amount:
+                                opposite.amount = fill_qty
                         if opposite and use_trailing:
                             self.trailing_tp.add_entry(
                                 pair, managed.side, managed.fill_price,
-                                managed.amount, opposite.price,
+                                fill_qty, opposite.price,
                             )
                         elif opposite:
                             await self._place_counter_order(pair, bot, opposite, managed.fill_price)
@@ -1088,12 +1109,25 @@ class MultiPairBot:
     async def _on_order_update(self, symbol: str, order: dict):
         bot = self.pair_bots.get(symbol)
         if bot:
+            ccxt_status = (order.get("status") or "").upper()
+            order_status = "FILLED"
+            if ccxt_status == "OPEN" or ccxt_status == "":
+                order_status = "PARTIALLY_FILLED"
+            elif ccxt_status in ("CLOSED", "FILLED"):
+                order_status = "FILLED"
+            elif ccxt_status == "CANCELED":
+                return
+
+            info = order.get("info", {})
             enriched = {
                 "id": order.get("id", ""),
                 "price": order.get("price", 0),
                 "cum_quote_qty": order.get("cost", 0),
                 "cum_qty": order.get("filled", 0),
-                "is_maker": order.get("info", {}).get("m", True),
+                "last_qty": float(info.get("l", 0)),
+                "last_price": float(info.get("L", 0)),
+                "order_status": order_status,
+                "is_maker": info.get("m", True),
             }
             fee_info = order.get("fee") or {}
             if fee_info.get("cost"):

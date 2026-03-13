@@ -30,10 +30,25 @@ class GridLevel:
     order_id: str | None = None
     filled: bool = False
     index: int = 0
+    partial_fills: list = field(default_factory=list)
 
     @property
     def level_id(self) -> str:
         return f"{self.side}_{self.index}_{self.price:.2f}"
+
+    @property
+    def filled_amount(self) -> float:
+        return sum(amt for _, _, amt in self.partial_fills)
+
+    @property
+    def is_fully_filled(self) -> bool:
+        return self.filled
+
+    @property
+    def fill_pct(self) -> float:
+        if self.amount <= 0:
+            return 100.0 if self.filled else 0.0
+        return min(self.filled_amount / self.amount * 100, 100.0)
 
 
 @dataclass

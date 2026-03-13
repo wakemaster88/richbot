@@ -13,7 +13,10 @@ interface BotStatus {
   pairs: string[]; pairStatuses: Record<string, PairMetrics>;
   startedAt: string; version: string; dbConnected?: boolean;
 }
-interface OpenOrder { side: string; price: number; amount: number; id: string; }
+interface OpenOrder {
+  side: string; price: number; amount: number; id: string;
+  status?: string; fill_pct?: number; filled_amount?: number;
+}
 interface FeeMetrics {
   maker_fee_pct: number; taker_fee_pct: number; fee_source: string;
   min_profitable_spacing_pct: number; current_spacing_pct: number;
@@ -22,7 +25,7 @@ interface FeeMetrics {
 interface PairMetrics {
   pair: string; price: number; range: string; range_source: string;
   grid_levels: number; grid_configured?: number; grid_buy_count?: number; grid_sell_count?: number;
-  active_orders: number; filled_orders: number;
+  active_orders: number; filled_orders: number; partially_filled_orders?: number;
   unplaced_orders?: number; grid_issue?: string;
   allocation?: { equity: number; reserve: number; amount_per_order: number; rebalance_needed: boolean };
   regime?: { regime: string; rsi: number; adx: number; boll_width: number; avg_boll_width: number; sentiment_score?: number; sentiment_confidence?: number };
@@ -480,7 +483,12 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
       <div className="grid grid-cols-4 gap-2 mb-3">
         <div className="card-inner px-2 py-1.5 text-center">
           <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Grid</p>
-          <p className="text-[12px] font-bold font-mono">{m.active_orders}/{m.grid_configured || m.grid_levels}</p>
+          <p className="text-[12px] font-bold font-mono">
+            {m.active_orders}/{m.grid_configured || m.grid_levels}
+            {(m.partially_filled_orders ?? 0) > 0 && (
+              <span className="text-[9px] text-[#f59e0b] ml-0.5">({m.partially_filled_orders}⏳)</span>
+            )}
+          </p>
         </div>
         <div className="card-inner px-2 py-1.5 text-center">
           <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Trades</p>
@@ -851,10 +859,19 @@ function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC"
               );
             }}
           />
-          {(orders || []).map((o) => (
-            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "#22c55e" : "#ef4444"} strokeDasharray="3 4" strokeOpacity={0.25} strokeWidth={1}
-              label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "#22c55e" : "#ef4444", fontSize: 7, position: o.side === "buy" ? "left" : "right", offset: 4 }} />
-          ))}
+          {(orders || []).map((o) => {
+            const isPartial = o.status === "partially_filled";
+            const color = isPartial ? "#f59e0b" : o.side === "buy" ? "#22c55e" : "#ef4444";
+            const label = isPartial
+              ? `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)} (${o.fill_pct ?? 0}%)`
+              : `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`;
+            return (
+              <ReferenceLine key={o.id} y={o.price} stroke={color}
+                strokeDasharray={isPartial ? "6 3" : "3 4"}
+                strokeOpacity={isPartial ? 0.55 : 0.25} strokeWidth={isPartial ? 1.5 : 1}
+                label={{ value: label, fill: color, fontSize: 7, position: o.side === "buy" ? "left" : "right", offset: 4 }} />
+            );
+          })}
           <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill={`url(#${gId})`} dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
           <Scatter dataKey="buyMarker" fill="#10b981" isAnimationActive={false}
             shape={(props: { cx?: number; cy?: number; payload?: Record<string, unknown> }) => {
@@ -895,7 +912,7 @@ function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC"
       {/* Footer: Grid info + Trade summary */}
       <div className="mt-2.5 pt-2 border-t flex flex-col gap-1.5" style={{ borderColor: "var(--border-subtle)" }}>
         {/* Grid Orders Row */}
-        {gridMeta && (orders || []).length > 0 && (
+        {gridMeta && (orders || []).length > 0 && (<>
           <div className="flex items-center gap-2 text-[9px]">
             <span className="text-[var(--text-quaternary)] uppercase tracking-wider font-semibold" style={{ fontSize: 8 }}>Grid</span>
             <div className="flex items-center gap-1">
@@ -907,9 +924,29 @@ function PreisChart({ pair, orders, trades: pairTrades, gridMeta, quote = "USDC"
               <span className="text-[var(--text-quaternary)]">{gridMeta.sellCount ?? 0}V</span>
             </div>
             <span className="text-[var(--text-quaternary)] font-mono">= {(orders || []).length}/{gridMeta.configured || gridMeta.levels}</span>
+            {(orders || []).some(o => o.status === "partially_filled") && (
+              <span className="text-[#f59e0b] font-mono">{(orders || []).filter(o => o.status === "partially_filled").length} partial</span>
+            )}
             <span className="text-[var(--text-quaternary)] ml-auto font-mono">{gridMeta.range}</span>
           </div>
-        )}
+          {(orders || []).filter(o => o.status === "partially_filled").length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-0.5">
+              {(orders || []).filter(o => o.status === "partially_filled").map(o => (
+                <div key={o.id} className="flex items-center gap-1 px-1.5 py-0.5 rounded"
+                  style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)" }}>
+                  <span className="text-[8px] font-bold" style={{ color: o.side === "buy" ? "var(--up)" : "var(--down)" }}>
+                    {o.side === "buy" ? "K" : "V"}
+                  </span>
+                  <span className="text-[8px] font-mono text-[var(--text-tertiary)]">{fmt(o.price, 0)}</span>
+                  <div className="w-8 h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(245,158,11,0.15)" }}>
+                    <div className="h-full rounded-full" style={{ width: `${o.fill_pct ?? 0}%`, background: "#f59e0b", transition: "width 0.5s" }} />
+                  </div>
+                  <span className="text-[7px] font-mono text-[#f59e0b]">{(o.fill_pct ?? 0).toFixed(0)}%</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>)}
         {gridMeta?.issue && (
           <div className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[8px]"
             style={{ background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid color-mix(in srgb, var(--warn) 15%, transparent)" }}>
