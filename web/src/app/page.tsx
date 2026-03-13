@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   AreaChart, Area, BarChart, Bar, ComposedChart, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, CartesianGrid, Cell, ReferenceLine,
+  ResponsiveContainer, CartesianGrid, Cell, ReferenceLine, Scatter,
 } from "recharts";
 
 // -- Types --
@@ -557,7 +557,7 @@ function PnlChart({ data, quote = "USDC" }: { data: { zeit: string; pnl: number 
 
 interface Kline { t: number; o: number; h: number; l: number; c: number; v: number; }
 
-function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: OpenOrder[]; quote?: string }) {
+function PreisChart({ pair, orders, trades: pairTrades, quote = "USDC" }: { pair: string; orders?: OpenOrder[]; trades?: Trade[]; quote?: string }) {
   const [klines, setKlines] = useState<Kline[]>([]);
   const [interval, setInterval_] = useState("5m");
   const [error, setError] = useState(false);
@@ -628,10 +628,39 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
     );
   }
 
-  const data = klines.map((k) => ({
-    zeit: new Date(k.t).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
-    preis: k.c, hoch: k.h, tief: k.l,
-  }));
+  const chartStart = klines[0]?.t || 0;
+  const chartEnd = klines[klines.length - 1]?.t || 0;
+  const bucketMs = klines.length > 1 ? klines[1].t - klines[0].t : 300000;
+
+  const visibleTrades = (pairTrades || []).filter(t => {
+    const ts = new Date(t.timestamp).getTime();
+    return ts >= chartStart && ts <= chartEnd + bucketMs;
+  });
+
+  const tradeMap = new Map<number, Trade[]>();
+  for (const t of visibleTrades) {
+    const ts = new Date(t.timestamp).getTime();
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < klines.length; i++) {
+      const dist = Math.abs(klines[i].t - ts);
+      if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    }
+    const arr = tradeMap.get(bestIdx) || [];
+    arr.push(t);
+    tradeMap.set(bestIdx, arr);
+  }
+
+  const data = klines.map((k, i) => {
+    const trades = tradeMap.get(i);
+    return {
+      zeit: new Date(k.t).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
+      preis: k.c, hoch: k.h, tief: k.l,
+      buyMarker: trades?.find(t => t.side === "buy") ? trades.find(t => t.side === "buy")!.price : undefined,
+      sellMarker: trades?.find(t => t.side === "sell") ? trades.find(t => t.side === "sell")!.price : undefined,
+      _trades: trades || undefined,
+    };
+  });
 
   const allPrices = klines.flatMap((k) => [k.h, k.l]);
   const orderPrices = (orders || []).map((o) => o.price);
@@ -644,6 +673,15 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
   const up = last >= first;
   const col = up ? "var(--up)" : "var(--down)";
   const chg = first > 0 ? ((last - first) / first * 100) : 0;
+
+  const buyCount = visibleTrades.filter(t => t.side === "buy").length;
+  const sellCount = visibleTrades.filter(t => t.side === "sell").length;
+  const tradePnl = visibleTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+
+  const uid = pair.replace(/\W/g, "");
+  const gId = `prG-${uid}`;
+  const gbId = `glB-${uid}`;
+  const gsId = `glS-${uid}`;
 
   return (
     <div className="card p-4 sm:p-5 h-full">
@@ -670,27 +708,117 @@ function PreisChart({ pair, orders, quote = "USDC" }: { pair: string; orders?: O
         </span>
       </div>
       <ResponsiveContainer width="100%" height={220}>
-        <ComposedChart data={data} margin={{ top: 0, right: 0, left: -15, bottom: 0 }}>
+        <ComposedChart data={data} margin={{ top: 4, right: 0, left: -15, bottom: 0 }}>
           <defs>
-            <linearGradient id="prG" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={col} stopOpacity={0.12} />
               <stop offset="100%" stopColor={col} stopOpacity={0} />
             </linearGradient>
+            <filter id={gbId}><feDropShadow dx="0" dy="0" stdDeviation="2.5" floodColor="#10b981" floodOpacity="0.7" /></filter>
+            <filter id={gsId}><feDropShadow dx="0" dy="0" stdDeviation="2.5" floodColor="#ef4444" floodOpacity="0.7" /></filter>
           </defs>
           <CartesianGrid stroke="var(--border-subtle)" strokeDasharray="3 3" vertical={false} />
           <XAxis dataKey="zeit" tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
           <YAxis tick={{ fill: "var(--text-quaternary)", fontSize: 9 }} axisLine={false} tickLine={false} domain={[mn - pad, mx + pad]} width={55} tickFormatter={(v) => fmt(v, 0)} />
           <Tooltip
-            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 10, padding: "6px 10px", fontSize: 11 }}
-            formatter={(v: number, name: string) => [fmt(v) + " " + quote, name === "preis" ? "Preis" : name === "hoch" ? "Hoch" : "Tief"]}
+            contentStyle={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 12, padding: "8px 12px", fontSize: 11, boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }}
+            content={({ active, payload, label }) => {
+              if (!active || !payload?.length) return null;
+              const entry = payload[0]?.payload;
+              const tdList = entry?._trades as Trade[] | undefined;
+              return (
+                <div style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-accent)", borderRadius: 12, padding: "8px 12px", fontSize: 11, boxShadow: "0 8px 32px rgba(0,0,0,0.4)", minWidth: 160 }}>
+                  <div style={{ color: "var(--text-tertiary)", marginBottom: 4, fontSize: 10, fontWeight: 500 }}>{label}</div>
+                  <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 13, fontWeight: 700, color: col }}>{fmt(entry?.preis || 0)} {quote}</div>
+                  {entry?.hoch && <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 9, color: "var(--text-quaternary)" }}>
+                    <span>H: {fmt(entry.hoch)}</span><span>T: {fmt(entry.tief)}</span>
+                  </div>}
+                  {tdList && tdList.map((t, i) => (
+                    <div key={i} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border-subtle)" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 6px", borderRadius: 4, fontSize: 9, fontWeight: 700, letterSpacing: "0.04em",
+                          background: t.side === "buy" ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.15)",
+                          color: t.side === "buy" ? "#34d399" : "#fca5a5",
+                        }}>
+                          <span style={{ fontSize: 11 }}>{t.side === "buy" ? "▲" : "▼"}</span>
+                          {t.side === "buy" ? "KAUF" : "VERKAUF"}
+                        </span>
+                        <span style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 11, fontWeight: 600 }}>{fmt(t.price)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, fontSize: 10 }}>
+                        <span style={{ color: "var(--text-quaternary)" }}>{fmtAmount(t.amount, pair.split("/")[0])}</span>
+                        <span style={{
+                          fontFamily: "JetBrains Mono, monospace", fontWeight: 700, fontSize: 11,
+                          padding: "1px 5px", borderRadius: 4,
+                          background: t.pnl >= 0 ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
+                          color: t.pnl >= 0 ? "#34d399" : "#fca5a5",
+                        }}>
+                          {t.pnl >= 0 ? "+" : ""}{t.pnl.toFixed(4)} {quote}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            }}
           />
           {(orders || []).map((o) => (
-            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "var(--up)" : "var(--down)"} strokeDasharray="4 3" strokeOpacity={0.5}
+            <ReferenceLine key={o.id} y={o.price} stroke={o.side === "buy" ? "var(--up)" : "var(--down)"} strokeDasharray="4 3" strokeOpacity={0.35}
               label={{ value: `${o.side === "buy" ? "K" : "V"} ${fmt(o.price, 0)}`, fill: o.side === "buy" ? "var(--up)" : "var(--down)", fontSize: 8, position: "right" }} />
           ))}
-          <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill="url(#prG)" dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
+          <Area type="monotone" dataKey="preis" stroke={col} strokeWidth={1.5} fill={`url(#${gId})`} dot={false} activeDot={{ r: 3, fill: col, strokeWidth: 0 }} />
+          <Scatter dataKey="buyMarker" fill="#10b981" stroke="#065f46" strokeWidth={1.5}
+            shape={(props: { cx?: number; cy?: number }) => {
+              if (!props.cx || !props.cy) return <></>;
+              return (
+                <g filter={`url(#${gbId})`} className="trade-marker-buy">
+                  <circle cx={props.cx} cy={props.cy} r={5} fill="#10b981" stroke="#065f46" strokeWidth={1} />
+                  <circle cx={props.cx} cy={props.cy} r={2.5} fill="#34d399" strokeWidth={0} />
+                  <polygon points={`${props.cx - 3},${props.cy + 1} ${props.cx},${props.cy - 3} ${props.cx + 3},${props.cy + 1}`}
+                    fill="#fff" fillOpacity={0.9} strokeWidth={0} />
+                </g>
+              );
+            }} />
+          <Scatter dataKey="sellMarker" fill="#ef4444" stroke="#7f1d1d" strokeWidth={1.5}
+            shape={(props: { cx?: number; cy?: number }) => {
+              if (!props.cx || !props.cy) return <></>;
+              return (
+                <g filter={`url(#${gsId})`} className="trade-marker-sell">
+                  <circle cx={props.cx} cy={props.cy} r={5} fill="#ef4444" stroke="#7f1d1d" strokeWidth={1} />
+                  <circle cx={props.cx} cy={props.cy} r={2.5} fill="#fca5a5" strokeWidth={0} />
+                  <polygon points={`${props.cx - 3},${props.cy - 1} ${props.cx},${props.cy + 3} ${props.cx + 3},${props.cy - 1}`}
+                    fill="#fff" fillOpacity={0.9} strokeWidth={0} />
+                </g>
+              );
+            }} />
         </ComposedChart>
       </ResponsiveContainer>
+      {visibleTrades.length > 0 && (
+        <div className="flex items-center gap-3 mt-2.5 pt-2 border-t" style={{ borderColor: "var(--border-subtle)" }}>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full" style={{ background: "rgba(16,185,129,0.15)" }}>
+              <span style={{ color: "#34d399", fontSize: 8, lineHeight: 1 }}>▲</span>
+            </span>
+            <span className="text-[9px] text-[var(--text-quaternary)]">Kauf <strong className="text-[var(--up)] font-mono">{buyCount}</strong></span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-flex items-center justify-center w-4 h-4 rounded-full" style={{ background: "rgba(239,68,68,0.15)" }}>
+              <span style={{ color: "#fca5a5", fontSize: 8, lineHeight: 1 }}>▼</span>
+            </span>
+            <span className="text-[9px] text-[var(--text-quaternary)]">Verkauf <strong className="text-[var(--down)] font-mono">{sellCount}</strong></span>
+          </div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="text-[9px] text-[var(--text-quaternary)]">Sichtbar PnL</span>
+            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded" style={{
+              background: tradePnl >= 0 ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
+              color: tradePnl >= 0 ? "#34d399" : "#fca5a5",
+            }}>
+              {tradePnl >= 0 ? "+" : ""}{tradePnl.toFixed(4)} {quote}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1212,7 +1340,7 @@ export default function Dashboard() {
   const refresh = useCallback(async () => {
     const [s, t, e, c, ev, an, opt, pi] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
-      fetchJson<Trade[]>("/api/trades?limit=50"),
+      fetchJson<Trade[]>("/api/trades?limit=100"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
       fetchJson<CommandRecord[]>("/api/commands?limit=20"),
       fetchJson<BotEvent[]>("/api/events?limit=30"),
@@ -1377,7 +1505,7 @@ export default function Dashboard() {
       {pairs.length > 0 ? pairs.map(([p, m]) => (
         <div key={p} className="grid grid-cols-1 lg:grid-cols-12 gap-3 mb-3">
           <div className="lg:col-span-5">
-            <PreisChart pair={p} orders={m.open_orders} quote={quoteCcy} />
+            <PreisChart pair={p} orders={m.open_orders} trades={trades.filter(t => t.pair === p)} quote={quoteCcy} />
           </div>
           <div className="lg:col-span-4">
             <GridVisualisierung m={m} />
@@ -1388,7 +1516,7 @@ export default function Dashboard() {
         </div>
       )) : (
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 mb-3">
-          <div className="lg:col-span-3"><PreisChart pair="BTC/USDC" quote={quoteCcy} /></div>
+          <div className="lg:col-span-3"><PreisChart pair="BTC/USDC" trades={trades.filter(t => t.pair === "BTC/USDC")} quote={quoteCcy} /></div>
           <div className="lg:col-span-2 card p-5 flex items-center justify-center text-[11px] text-[var(--text-quaternary)]">Keine Paare aktiv</div>
         </div>
       )}
