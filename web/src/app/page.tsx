@@ -68,6 +68,19 @@ interface PiSystem {
 }
 interface PiStatus { connected: boolean; lastSeen?: string; uptime?: number; system: PiSystem | null; }
 
+interface RLStats {
+  rewards: { episode: number; reward: number; exploration: number; timestamp: string }[];
+  latestAction: {
+    action: { spacing_delta: number; size_delta: number; range_delta: number; distance_delta: number; action_idx: number; was_exploration: boolean } | null;
+    reward: number; was_exploration: boolean; episode: number;
+    heuristic_adj: Record<string, number> | null; merged_adj: Record<string, number> | null;
+    timestamp: string;
+  } | null;
+  explorationRate: number;
+  episodes: number;
+  policyHints: Record<string, unknown>;
+}
+
 // -- Demo Data --
 
 function generateDemoEquity(): EquityPoint[] {
@@ -995,11 +1008,32 @@ function TradesTabelle({ trades, trailingTp, quote = "USDC" }: {
 
 // -- Selbst-Optimierung Panel --
 
-function SelbstOptimierungPanel({ optData, pairs }: {
+function SelbstOptimierungPanel({ optData, pairs, rlStats, onCommand }: {
   optData: { optimizations: BotEvent[]; regimes: BotEvent[]; pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }> };
   pairs: [string, PairMetrics][];
+  rlStats: RLStats | null;
+  onCommand: (t: string) => void;
 }) {
   const lastOpt = optData.optimizations[0];
+
+  const rlRewards = rlStats?.rewards ?? [];
+  const last30 = rlRewards.slice(-30);
+  const rewardTrend = last30.length >= 2 ? last30[last30.length - 1].reward - last30[0].reward : 0;
+  const avgReward = last30.length > 0 ? last30.reduce((s, r) => s + r.reward, 0) / last30.length : 0;
+  const rewardMin = last30.length > 0 ? Math.min(...last30.map(r => r.reward)) : 0;
+  const rewardMax = last30.length > 0 ? Math.max(...last30.map(r => r.reward)) : 1;
+  const rewardRange = Math.max(rewardMax - rewardMin, 0.01);
+
+  const explorationPct = (rlStats?.explorationRate ?? 0.15) * 100;
+  const explorationProgress = Math.max(0, Math.min(100, ((0.15 - (rlStats?.explorationRate ?? 0.15)) / (0.15 - 0.03)) * 100));
+
+  const la = rlStats?.latestAction;
+  const laAction = la?.action as { spacing_delta?: number; size_delta?: number; range_delta?: number; distance_delta?: number; was_exploration?: boolean } | null;
+
+  const fmtDelta = (v: number | undefined) => {
+    if (v === undefined || v === 0) return "0%";
+    return `${v > 0 ? "+" : ""}${(v * 100).toFixed(0)}%`;
+  };
 
   return (
     <div className="card p-4 sm:p-5 fade-in">
@@ -1083,7 +1117,7 @@ function SelbstOptimierungPanel({ optData, pairs }: {
         </div>
       )}
       {optData.regimes.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap gap-1.5 mb-4">
           <span className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-semibold self-center">Regime-Verlauf:</span>
           {optData.regimes.slice(0, 5).map((ev) => {
             const d = ev.detail as Record<string, string> | null;
@@ -1099,6 +1133,102 @@ function SelbstOptimierungPanel({ optData, pairs }: {
               </span>
             );
           })}
+        </div>
+      )}
+
+      {/* RL Lern-Fortschritt */}
+      {(rlStats && rlStats.episodes > 0) && (
+        <div className="rounded-lg p-3 mt-1" style={{ background: "var(--bg-secondary)" }}>
+          <div className="flex items-center justify-between mb-2.5">
+            <div className="text-[9px] text-[var(--text-quaternary)] uppercase tracking-wider font-semibold">Lern-Fortschritt</div>
+            <span className="text-[8px] font-mono px-1.5 py-0.5 rounded font-bold" style={{
+              background: rewardTrend >= 0 ? "var(--up-bg)" : "var(--down-bg)",
+              color: rewardTrend >= 0 ? "var(--up)" : "var(--down)",
+            }}>{rewardTrend >= 0 ? "\u2191" : "\u2193"} {avgReward >= 0 ? "+" : ""}{avgReward.toFixed(2)} avg</span>
+          </div>
+
+          {/* Reward Sparkline */}
+          {last30.length >= 2 && (
+            <div className="mb-2.5">
+              <div className="text-[8px] text-[var(--text-quaternary)] mb-1">Reward (letzte {last30.length} Episoden)</div>
+              <svg width="100%" height="36" viewBox={`0 0 ${last30.length - 1} 36`} preserveAspectRatio="none"
+                style={{ display: "block", borderRadius: 4, background: "var(--bg-primary)" }}>
+                <defs>
+                  <linearGradient id="rlSparkGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={rewardTrend >= 0 ? "#10b981" : "#ef4444"} stopOpacity={0.3} />
+                    <stop offset="100%" stopColor={rewardTrend >= 0 ? "#10b981" : "#ef4444"} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <path d={
+                  last30.map((r, i) => {
+                    const x = i;
+                    const y = 34 - ((r.reward - rewardMin) / rewardRange) * 30;
+                    return `${i === 0 ? "M" : "L"}${x},${y}`;
+                  }).join(" ") + ` L${last30.length - 1},36 L0,36 Z`
+                } fill="url(#rlSparkGrad)" />
+                <path d={
+                  last30.map((r, i) => {
+                    const x = i;
+                    const y = 34 - ((r.reward - rewardMin) / rewardRange) * 30;
+                    return `${i === 0 ? "M" : "L"}${x},${y}`;
+                  }).join(" ")
+                } fill="none" stroke={rewardTrend >= 0 ? "#10b981" : "#ef4444"} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+              </svg>
+            </div>
+          )}
+
+          {/* Exploration Progress */}
+          <div className="mb-2.5">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[8px] text-[var(--text-quaternary)]">Episode {rlStats.episodes} — {explorationPct.toFixed(1)}% Erkundung</span>
+              <span className="text-[8px] font-mono" style={{ color: explorationPct > 10 ? "var(--warn)" : "var(--up)" }}>
+                {explorationPct > 10 ? "Lernt" : "Nutzt"}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-primary)" }}>
+              <div className="h-full rounded-full transition-all" style={{
+                width: `${explorationProgress}%`,
+                background: `linear-gradient(90deg, var(--warn), var(--up))`,
+              }} />
+            </div>
+            <div className="flex justify-between text-[7px] text-[var(--text-quaternary)] mt-0.5">
+              <span>15% Exploration</span>
+              <span>3% Exploitation</span>
+            </div>
+          </div>
+
+          {/* Last Action */}
+          {la && laAction && (
+            <div className="mb-2.5 p-2 rounded" style={{ background: "var(--bg-primary)" }}>
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="text-[8px] text-[var(--text-quaternary)]">Letzte Aktion:</span>
+                <span className="text-[7px] font-bold px-1 py-0.5 rounded" style={{
+                  background: la.was_exploration ? "rgba(234,179,8,0.12)" : "var(--up-bg)",
+                  color: la.was_exploration ? "#eab308" : "var(--up)",
+                }}>{la.was_exploration ? "EXPLORATION" : "EXPLOITATION"}</span>
+              </div>
+              <div className="text-[9px] font-mono text-[var(--text-secondary)]">
+                Spacing {fmtDelta(laAction.spacing_delta)}, Size {fmtDelta(laAction.size_delta)}, Range {fmtDelta(laAction.range_delta)}
+              </div>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-[9px] font-mono" style={{ color: la.reward >= 0 ? "var(--up)" : "var(--down)" }}>
+                  Reward: {la.reward >= 0 ? "+" : ""}{la.reward.toFixed(3)}
+                </span>
+                <span className="text-[8px] text-[var(--text-quaternary)]">
+                  {zeitAgo(la.timestamp)}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Reset Button */}
+          <div className="flex justify-end">
+            <button onClick={() => { if (confirm("RL-Policy wirklich zurücksetzen?")) onCommand("reset_rl"); }}
+              className="px-2 py-1 rounded text-[8px] font-semibold transition-all active:scale-95"
+              style={{ background: "var(--down-bg)", color: "var(--down)", border: "1px solid color-mix(in srgb, var(--down) 15%, transparent)" }}>
+              Policy zurücksetzen
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1156,7 +1286,7 @@ function BotGesundheit({ pi, status }: { pi: PiStatus | null; status: BotStatus 
 const EVT_ICONS: Record<string, string> = {
   trade: "T", grid: "G", error: "!", config: "C", system: "S",
   monitoring: "\u26A1", regime: "R", optimization: "\u2699", trailing_tp: "\u2197", memory: "M",
-  sentiment: "\uD83D\uDCF0",
+  sentiment: "\uD83D\uDCF0", rl_optimization: "\uD83E\uDDE0",
 };
 const EVT_COLORS: Record<string, string> = {
   trade: "var(--accent)", grid: "var(--cyan)", error: "var(--down)",
@@ -1164,6 +1294,7 @@ const EVT_COLORS: Record<string, string> = {
   config: "var(--text-secondary)", system: "var(--text-tertiary)",
   monitoring: "var(--warn)", regime: "#3b82f6", optimization: "var(--accent)",
   trailing_tp: "var(--up)", memory: "var(--warn)", sentiment: "#8b5cf6",
+  rl_optimization: "#f59e0b",
 };
 
 const REGIME_STYLE: Record<string, { label: string; color: string; bg: string }> = {
@@ -1380,6 +1511,7 @@ export default function Dashboard() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [optData, setOptData] = useState<{ optimizations: BotEvent[]; regimes: BotEvent[]; pairRegimes: Record<string, { regime: PairMetrics["regime"]; allocation: PairMetrics["allocation"]; trailing_tp_count: number; trailing_tp_active: boolean }> }>({ optimizations: [], regimes: [], pairRegimes: {} });
   const [piStatus, setPiStatus] = useState<PiStatus | null>(null);
+  const [rlStats, setRlStats] = useState<RLStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false);
   const [latestCommit, setLatestCommit] = useState<string | null>(null);
@@ -1389,7 +1521,7 @@ export default function Dashboard() {
   const demoTrades = useMemo(() => generateDemoTrades(), []);
 
   const refresh = useCallback(async () => {
-    const [s, t, e, c, ev, an, opt, pi] = await Promise.all([
+    const [s, t, e, c, ev, an, opt, pi, rl] = await Promise.all([
       fetchJson<BotStatus>("/api/status"),
       fetchJson<Trade[]>("/api/trades?limit=100"),
       fetchJson<EquityPoint[]>("/api/equity?hours=24"),
@@ -1398,6 +1530,7 @@ export default function Dashboard() {
       fetchJson<AnalyticsData>("/api/analytics"),
       fetchJson<typeof optData>("/api/optimization"),
       fetchJson<PiStatus>("/api/pi"),
+      fetchJson<RLStats>("/api/rl-stats"),
     ]);
 
     if (s?.dbConnected) {
@@ -1409,6 +1542,7 @@ export default function Dashboard() {
       if (an?.summary) setAnalytics(an);
       if (opt) setOptData(opt);
       if (pi) setPiStatus(pi);
+      if (rl) setRlStats(rl);
       setIsDemo(false);
     } else {
       setBotStatus(DEMO_STATUS);
@@ -1584,7 +1718,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
         <TradesTabelle trades={trades} trailingTp={allTrailingTp.length > 0 ? allTrailingTp : undefined} quote={quoteCcy} />
         {!isDemo && pairs.length > 0 && (
-          <SelbstOptimierungPanel optData={optData} pairs={pairs} />
+          <SelbstOptimierungPanel optData={optData} pairs={pairs} rlStats={rlStats} onCommand={handleCommand} />
         )}
       </div>
 
