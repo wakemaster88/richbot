@@ -493,6 +493,8 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
   const [finding, setFinding] = useState(false);
   const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [meta, setMeta] = useState<Record<string, { set: boolean }>>({});
+  const [editingToken, setEditingToken] = useState(false);
+  const [editingChatId, setEditingChatId] = useState(false);
 
   useEffect(() => {
     fetch("/api/secrets", { cache: "no-store" })
@@ -613,7 +615,7 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
           </span>
           <span className="text-xs font-semibold text-[var(--text-primary)]">Bot-Token von BotFather</span>
         </div>
-        {!tokenSet ? (
+        {!tokenSet || editingToken ? (
           <div className="ml-7 space-y-2">
             <p className="text-[10px] text-[var(--text-tertiary)] leading-relaxed">
               Oeffne <a href="https://t.me/BotFather" target="_blank" className="text-[var(--accent)] underline">@BotFather</a> auf Telegram, sende <span className="font-mono text-[var(--text-secondary)]">/newbot</span>, vergib einen Namen und kopiere den Token hierher.
@@ -621,15 +623,24 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
             <div className="flex gap-2">
               <input type="text" value={token} onChange={(e) => setToken(e.target.value)} placeholder="123456789:ABCdef..."
                 className="flex-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-primary)] placeholder:text-[var(--text-quaternary)] focus:border-[var(--accent)] focus:outline-none transition-all" />
-              <button onClick={saveToken} disabled={saving || !token.trim()}
+              <button onClick={() => { saveToken(); setEditingToken(false); }} disabled={saving || !token.trim()}
                 className="px-4 py-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
                 style={{ background: "var(--accent-bg)", color: "var(--accent)" }}>
                 {saving ? "..." : "Speichern"}
               </button>
+              {editingToken && (
+                <button onClick={() => setEditingToken(false)}
+                  className="px-3 py-2 rounded-lg text-[11px] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-all">
+                  Abbrechen
+                </button>
+              )}
             </div>
           </div>
         ) : (
-          <p className="ml-7 text-[10px] text-[var(--up)]">Bot-Token ist gesetzt</p>
+          <div className="ml-7 flex items-center gap-3">
+            <p className="text-[10px] text-[var(--up)]">Bot-Token ist gesetzt</p>
+            <button onClick={() => setEditingToken(true)} className="text-[9px] text-[var(--accent)] hover:underline">Aendern</button>
+          </div>
         )}
       </div>
 
@@ -641,7 +652,7 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
           </span>
           <span className="text-xs font-semibold text-[var(--text-primary)]">Chat-ID verknuepfen</span>
         </div>
-        {tokenSet && !chatIdSet ? (
+        {(tokenSet && !chatIdSet) || editingChatId ? (
           <div className="ml-7 space-y-3">
             <p className="text-[10px] text-[var(--text-tertiary)] leading-relaxed">
               Schreibe deinem Bot eine beliebige Nachricht auf Telegram, dann klicke:
@@ -655,7 +666,7 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
               <div className="space-y-1.5">
                 <p className="text-[10px] text-[var(--text-tertiary)]">Gefundene Chats — waehle deinen:</p>
                 {chats.map((c) => (
-                  <button key={c.id} onClick={() => selectChat(c.id)} disabled={saving}
+                  <button key={c.id} onClick={() => { selectChat(c.id); setEditingChatId(false); }} disabled={saving}
                     className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-left text-[11px] transition-all hover:opacity-80"
                     style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
                     <span className="font-medium text-[var(--text-primary)]">{c.name}</span>
@@ -672,15 +683,24 @@ function TelegramSektion({ config, update }: { config: BotConfigData; update: (p
             <div className="flex gap-2">
               <input type="text" value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="z.B. 987654321"
                 className="flex-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-primary)] placeholder:text-[var(--text-quaternary)] focus:border-[var(--accent)] focus:outline-none transition-all" />
-              <button onClick={saveChatIdManual} disabled={saving || !chatId.trim()}
+              <button onClick={() => { saveChatIdManual(); setEditingChatId(false); }} disabled={saving || !chatId.trim()}
                 className="px-4 py-2 rounded-lg text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40"
                 style={{ background: "var(--accent-bg)", color: "var(--accent)" }}>
                 {saving ? "..." : "Speichern"}
               </button>
+              {editingChatId && (
+                <button onClick={() => setEditingChatId(false)}
+                  className="px-3 py-2 rounded-lg text-[11px] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-all">
+                  Abbrechen
+                </button>
+              )}
             </div>
           </div>
         ) : chatIdSet ? (
-          <p className="ml-7 text-[10px] text-[var(--up)]">Chat-ID ist gesetzt</p>
+          <div className="ml-7 flex items-center gap-3">
+            <p className="text-[10px] text-[var(--up)]">Chat-ID ist gesetzt</p>
+            <button onClick={() => setEditingChatId(true)} className="text-[9px] text-[var(--accent)] hover:underline">Aendern</button>
+          </div>
         ) : (
           <p className="ml-7 text-[10px] text-[var(--text-quaternary)]">Zuerst Bot-Token eintragen</p>
         )}
