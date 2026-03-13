@@ -7,7 +7,7 @@ export { PortfolioHero } from "./PortfolioHero";
 export { WalletPanel } from "./WalletPanel";
 export { InventorySkewBar } from "./InventorySkewBar";
 export { PairInfoCard } from "./PairInfoCard";
-export { PriceChartTradingView as PriceChart } from "./PriceChartTradingView";
+export { PriceChart } from "./PriceChartWrapper";
 export { CircuitBreakerStatus } from "./CircuitBreakerStatus";
 export { CorrelationPanel } from "./CorrelationPanel";
 export { EquityChart } from "./EquityChart";
