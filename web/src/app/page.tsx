@@ -44,6 +44,12 @@ interface PairMetrics {
     total_pnl: number; total_fees: number;
     trade_count: number; buy_count: number; sell_count: number;
   };
+  skew?: {
+    skew_factor: number; skew_pct: number;
+    current_ratio: number; target_ratio: number;
+    base_value: number; quote_value: number;
+    description: string; needs_rebalance: boolean;
+  };
   open_orders?: OpenOrder[];
 }
 interface Trade {
@@ -555,6 +561,51 @@ function PairInfoCard({ pair, m, quote = "USDC", events = [] }: { pair: string; 
           <span>
             Pos: <strong className="text-[var(--text-tertiary)] font-mono">{m.inventory.base_inventory.toFixed(6)}</strong>
           </span>
+        </div>
+      )}
+      {m.skew && m.skew.skew_factor !== 0 && (
+        <div className="pb-2 border-b border-[var(--border-subtle)] mb-2">
+          <div className="flex items-center justify-between text-[9px] text-[var(--text-quaternary)] mb-1">
+            <span>
+              Inventory:{" "}
+              <strong className="text-[var(--text-secondary)]">
+                {(m.skew.current_ratio * 100).toFixed(0)}% {pair.split("/")[0]}
+              </strong>
+              {" / "}
+              <strong className="text-[var(--text-secondary)]">
+                {((1 - m.skew.current_ratio) * 100).toFixed(0)}% {pair.split("/")[1] || "USDC"}
+              </strong>
+              <span className="text-[8px] ml-1">(Ziel: {(m.skew.target_ratio * 100).toFixed(0)}/{((1 - m.skew.target_ratio) * 100).toFixed(0)})</span>
+            </span>
+            <span className={`font-semibold ${Math.abs(m.skew.skew_pct) > 30 ? "text-[var(--warn)]" : "text-[var(--text-tertiary)]"}`}>
+              {m.skew.skew_pct > 0 ? "+" : ""}{m.skew.skew_pct.toFixed(1)}%
+            </span>
+          </div>
+          <div className="relative h-2 rounded-full overflow-hidden" style={{ background: "var(--bg-tertiary)" }}>
+            <div className="absolute top-0 bottom-0 left-1/2 w-px" style={{ background: "var(--border-subtle)" }} />
+            <div
+              className="absolute top-0 bottom-0 rounded-full transition-all duration-500"
+              style={{
+                background: m.skew.skew_factor > 0 ? "var(--warn)" : "var(--accent)",
+                left: m.skew.skew_factor >= 0 ? "50%" : `${50 + m.skew.skew_factor * 50}%`,
+                width: `${Math.min(Math.abs(m.skew.skew_factor) * 50, 50)}%`,
+              }}
+            />
+          </div>
+          <div className="flex justify-between text-[7px] text-[var(--text-quaternary)] mt-0.5">
+            <span>−50%</span>
+            <span className="font-medium" style={{ color: Math.abs(m.skew.skew_pct) > 30 ? "var(--warn)" : "var(--text-tertiary)" }}>
+              {m.skew.description}
+            </span>
+            <span>+50%</span>
+          </div>
+          {m.skew.needs_rebalance && (
+            <div className="flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[8px] font-medium"
+              style={{ background: "color-mix(in srgb, var(--warn) 12%, transparent)", color: "var(--warn)" }}>
+              <span>⚠</span>
+              <span>Rebalance empfohlen — Skew zu hoch ({m.skew.skew_pct > 0 ? "+" : ""}{m.skew.skew_pct.toFixed(0)}%)</span>
+            </div>
+          )}
         </div>
       )}
       {m.fee_metrics && !m.fee_metrics.spacing_is_profitable && (

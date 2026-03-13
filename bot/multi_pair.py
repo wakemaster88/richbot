@@ -21,6 +21,7 @@ from bot.exchange import Exchange
 from bot.fee_engine import FeeEngine
 from bot.grid_engine import GridEngine
 from bot.inventory import InventoryTracker
+from bot.inventory_skew import InventorySkew
 from bot.ml_predictor import LSTMPredictor
 from bot.order_manager import OrderManager
 from bot.performance_tracker import PerformanceTracker, TradeRecord
@@ -48,7 +49,8 @@ class PairBot:
                  telegram: TelegramNotifier, ml_predictor: LSTMPredictor | None = None,
                  cloud: CloudSync | None = None,
                  fee_engine: FeeEngine | None = None,
-                 inventory: InventoryTracker | None = None):
+                 inventory: InventoryTracker | None = None,
+                 inventory_skew: InventorySkew | None = None):
         self.pair = pair
         self.config = config
         self.exchange = exchange
@@ -59,6 +61,7 @@ class PairBot:
         self.cloud = cloud
         self.fee_engine = fee_engine
         self.inventory = inventory or InventoryTracker()
+        self.inv_skew = inventory_skew or InventorySkew()
 
         self.pair_grid_count = 4  # will be set by CapitalAllocator
         self.pair_amount = 0.0
@@ -336,6 +339,7 @@ class PairBot:
             step_size=step_size, min_amount=min_amount,
             min_distance_pct=rp_init.min_distance_pct,
         )
+        self._apply_inventory_skew(rp_init.target_ratio)
 
         try:
             placed = await self.order_mgr.place_grid_orders(self.pair, self._entry_filter_dict())
@@ -430,6 +434,7 @@ class PairBot:
                     step_size=self.pair_step_size, min_amount=self.pair_min_amount,
                     min_distance_pct=rp.min_distance_pct,
                 )
+                self._apply_inventory_skew(rp.target_ratio)
 
                 if rp.trail_cooldown_sec > 0:
                     await asyncio.sleep(min(rp.trail_cooldown_sec, 15))
@@ -539,6 +544,35 @@ class PairBot:
             fees = self.fee_engine.get_fees(self.pair)
             self.order_mgr.FEE_RATE = max(fees.maker, fees.taker)
 
+    def _apply_inventory_skew(self, target_ratio: float | None = None):
+        """Shift grid prices/sizes based on inventory imbalance."""
+        if target_ratio is None:
+            target_ratio = self.regime.get_grid_params().target_ratio
+
+        inv = self.inventory.get_inventory(self.pair)
+        price = self.current_price
+        if price <= 0:
+            return
+
+        base_value = inv.base_inventory * price
+        quote_alloc = self.last_allocation
+        quote_value = quote_alloc.reserve_usdc if quote_alloc else 0.0
+        if base_value + quote_value <= 0:
+            return
+
+        result = self.inv_skew.apply_to_grid(
+            self.grid.state.levels, self.pair,
+            base_value=base_value, quote_value=quote_value,
+            target_ratio=target_ratio,
+            min_amount=self.pair_min_amount,
+        )
+
+        if result.needs_rebalance:
+            logger.warning(
+                "SKEW ALERT %s: %.0f%% — Rebalance empfohlen (base %.1f%% vs target %.1f%%)",
+                self.pair, result.skew_pct, result.current_ratio * 100, result.target_ratio * 100,
+            )
+
     def _entry_filter_dict(self, base_balance: float | None = None) -> dict:
         ef = self.regime.get_entry_filter()
         allow_sells = ef.allow_sells
@@ -595,6 +629,7 @@ class PairBot:
             },
             "fee_metrics": fee_metrics,
             "inventory": inv_metrics,
+            "skew": self.inv_skew.get_metrics(self.pair),
             **self.tracker.get_summary(self.pair),
         }
 
@@ -618,6 +653,7 @@ class MultiPairBot:
         self.trailing_tp = TrailingTakeProfit()
         self.fee_engine = FeeEngine()
         self.inventory = InventoryTracker()
+        self.inv_skew = InventorySkew()
         self.sentiment = NewsSentiment(
             api_key=config.sentiment.api_key,
             provider=config.sentiment.provider,
@@ -786,7 +822,8 @@ class MultiPairBot:
                 ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
             bot = PairBot(pair, self.config, self.exchange, self.risk,
                           self.tracker, self.telegram, ml, self.cloud,
-                          fee_engine=self.fee_engine, inventory=self.inventory)
+                          fee_engine=self.fee_engine, inventory=self.inventory,
+                          inventory_skew=self.inv_skew)
             self.pair_bots[pair] = bot
 
         saved_state = await self.cloud.load_state() if self.cloud.connected else None
@@ -924,6 +961,7 @@ class MultiPairBot:
                                 step_size=step_size, min_amount=min_amount,
                                 min_distance_pct=rp_r.min_distance_pct,
                             )
+                            bot._apply_inventory_skew(rp_r.target_ratio)
                             await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                         else:
                             logger.debug("%s: Range refresh — drift %.1f%%, keeping current grid", pair, drift * 100)
@@ -1583,6 +1621,7 @@ class MultiPairBot:
                 ) if bot.current_price else {}
 
                 inv_snap = self.inventory.mark_to_market(pair, bot.current_price) if bot.current_price else {}
+                skew_snap = self.inv_skew.get_metrics(pair)
 
                 asyncio.create_task(self.cloud.log_event(
                     "snapshot",
@@ -1616,6 +1655,7 @@ class MultiPairBot:
                         "maker_fill_pct": summary.get("maker_fill_pct", 100),
                         **fee_info,
                         **inv_snap,
+                        "skew": skew_snap,
                     },
                 ))
         except Exception as e:
@@ -1723,6 +1763,7 @@ class MultiPairBot:
                         step_size=step_size, min_amount=min_amount,
                         min_distance_pct=rp_a.min_distance_pct,
                     )
+                    bot._apply_inventory_skew(rp_a.target_ratio)
                     await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
 
                     logger.info(
@@ -1966,7 +2007,8 @@ class MultiPairBot:
                     ml = LSTMPredictor(self.config.ml, pair, pi_config=pi_cfg)
                 bot = PairBot(pair, self.config, self.exchange, self.risk,
                               self.tracker, self.telegram, ml, self.cloud,
-                              fee_engine=self.fee_engine, inventory=self.inventory)
+                              fee_engine=self.fee_engine, inventory=self.inventory,
+                              inventory_skew=self.inv_skew)
                 self.pair_bots[pair] = bot
                 try:
                     await bot.initialize(self.allocator, len(self.pair_bots), None)
@@ -2089,6 +2131,7 @@ class MultiPairBot:
                                 step_size=step_size, min_amount=min_amount,
                                 min_distance_pct=rp_c.min_distance_pct,
                             )
+                            bot._apply_inventory_skew(rp_c.target_ratio)
                             await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
                             actual = len(bot.grid.state.levels)
                             logger.info("%s Grid neu berechnet: %dB+%dS=%d Level, %.8f/Order",
