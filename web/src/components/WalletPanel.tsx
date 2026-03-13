@@ -18,13 +18,14 @@ function WalletPanelBase({ wallet, targetRatio, pairStats, equity }: WalletPanel
     .filter(([k]) => !k.startsWith("_"))
     .map(([symbol, entry]) => {
       const e = entry as WalletEntry;
-      const pct = total > 0 ? (e.usdc_value / total) * 100 : 0;
+      const uv = e?.usdc_value ?? 0;
+      const pct = total > 0 ? (uv / total) * 100 : 0;
       const base = symbol === "USDC" ? null : symbol;
       const pairKey = base ? Object.keys(pairStats || {}).find((k) => k.startsWith(base + "/")) : undefined;
       const stats = pairKey ? pairStats?.[pairKey] : undefined;
-      return { symbol, ...e, pct, stats };
+      return { symbol, ...e, usdc_value: uv, pct, stats };
     })
-    .sort((a, b) => b.usdc_value - a.usdc_value);
+    .sort((a, b) => (b.usdc_value ?? 0) - (a.usdc_value ?? 0));
 
   const usdcPct = coins.find((c) => c.symbol === "USDC")?.pct ?? 0;
 

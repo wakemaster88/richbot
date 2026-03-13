@@ -14,7 +14,8 @@ export interface PairInfoCardProps {
 }
 
 function PairInfoCardBase({ pair, m, quote = "USDC", events = [] }: PairInfoCardProps) {
-  const up = m.total_pnl >= 0;
+  const totalPnl = m.total_pnl ?? 0;
+  const up = totalPnl >= 0;
   const coin = pair.split("/")[0];
   const pairEvents = events
     .filter((ev) => {
@@ -50,14 +51,14 @@ function PairInfoCardBase({ pair, m, quote = "USDC", events = [] }: PairInfoCard
                 </span>
               )}
             </div>
-            <p className="text-[9px] text-[var(--text-quaternary)] font-mono">{m.range}</p>
+            <p className="text-[9px] text-[var(--text-quaternary)] font-mono">{m.range ?? "—"}</p>
           </div>
         </div>
         <div className="text-right">
-          <p className="text-lg font-bold font-mono tracking-tight">{fmt(m.price)}</p>
+          <p className="text-lg font-bold font-mono tracking-tight">{fmt(m.price ?? 0)}</p>
           <p className={`text-[11px] font-mono font-semibold ${up ? "text-[var(--up)]" : "text-[var(--down)]"}`}>
             {up ? "+" : ""}
-            {fmt(m.total_pnl, 4)} {quote}
+            {fmt(totalPnl, 4)} {quote}
           </p>
         </div>
       </div>
@@ -66,7 +67,7 @@ function PairInfoCardBase({ pair, m, quote = "USDC", events = [] }: PairInfoCard
         <div className="card-inner px-2 py-1.5 text-center">
           <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Grid</p>
           <p className="text-[12px] font-bold font-mono">
-            {m.active_orders}/{m.grid_configured || m.grid_levels}
+            {m.active_orders ?? 0}/{m.grid_configured ?? m.grid_levels ?? 0}
             {(m.partially_filled_orders ?? 0) > 0 && (
               <span className="text-[9px] text-[#f59e0b] ml-0.5">({m.partially_filled_orders}⏳)</span>
             )}
@@ -74,25 +75,25 @@ function PairInfoCardBase({ pair, m, quote = "USDC", events = [] }: PairInfoCard
         </div>
         <div className="card-inner px-2 py-1.5 text-center">
           <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Trades</p>
-          <p className="text-[12px] font-bold font-mono">{m.trade_count}</p>
+          <p className="text-[12px] font-bold font-mono">{m.trade_count ?? 0}</p>
         </div>
         <div className="card-inner px-2 py-1.5 text-center">
           <p className="text-[8px] text-[var(--text-quaternary)] uppercase">Sharpe</p>
           <p
-            className={`text-[12px] font-bold font-mono ${m.sharpe_ratio >= 1 ? "text-[var(--up)]" : ""}`}
+            className={`text-[12px] font-bold font-mono ${(m.sharpe_ratio ?? 0) >= 1 ? "text-[var(--up)]" : ""}`}
           >
-            {m.sharpe_ratio.toFixed(2)}
+            {(m.sharpe_ratio ?? 0).toFixed(2)}
           </p>
         </div>
         <div className="card-inner px-2 py-1.5 text-center">
           <p className="text-[8px] text-[var(--text-quaternary)] uppercase">DD</p>
-          <p className="text-[12px] font-bold font-mono text-[var(--warn)]">{fmt(m.max_drawdown_pct)}%</p>
+          <p className="text-[12px] font-bold font-mono text-[var(--warn)]">{fmt(m.max_drawdown_pct ?? 0)}%</p>
         </div>
       </div>
 
       {(m.annualized_return_pct || m.fees_paid || m.fee_metrics) && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pb-2 border-b border-[var(--border-subtle)] text-[9px] text-[var(--text-quaternary)] mb-2">
-          {m.fee_metrics && (
+          {m.fee_metrics && m.fee_metrics.net_profit_per_trade_pct != null && (
             <span>
               Netto/Trade:{" "}
               <strong
@@ -135,7 +136,7 @@ function PairInfoCardBase({ pair, m, quote = "USDC", events = [] }: PairInfoCard
             </span>
           )}
           <span>
-            Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity)}</strong>
+            Kapital: <strong className="text-[var(--text-tertiary)]">{fmt(m.current_equity ?? 0)}</strong>
           </span>
         </div>
       )}
@@ -178,7 +179,7 @@ function PairInfoCardBase({ pair, m, quote = "USDC", events = [] }: PairInfoCard
       {m.skew && m.skew.skew_factor !== 0 && (
         <InventorySkewBar skew={m.skew} pair={pair} />
       )}
-      {m.fee_metrics && !m.fee_metrics.spacing_is_profitable && (
+      {m.fee_metrics && !m.fee_metrics.spacing_is_profitable && m.fee_metrics.current_spacing_pct != null && m.fee_metrics.min_profitable_spacing_pct != null && (
         <div
           className="flex items-center gap-1.5 px-2 py-1 mb-2 rounded text-[9px] font-medium"
           style={{

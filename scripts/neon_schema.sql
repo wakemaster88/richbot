@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS trades (
     fee DOUBLE PRECISION NOT NULL,
     pnl DOUBLE PRECISION NOT NULL,
     grid_level DOUBLE PRECISION,
-    order_id TEXT
+    order_id TEXT,
+    fill_price DOUBLE PRECISION,
+    slippage_bps DOUBLE PRECISION,
+    is_maker BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_tr_bot_pair_ts ON trades(bot_id, pair, timestamp DESC);
 
