@@ -105,7 +105,8 @@ class CapitalAllocator:
         reserve = total_equity * RESERVE_PCT
         tradable = equity_per_pair * (1 - RESERVE_PCT)
 
-        quote_for_pair = min(quote_free, tradable)
+        quote_free_pp = quote_free / max(1, pair_count)
+        quote_for_pair = min(quote_free_pp, tradable)
         base_for_pair = min(base_free, tradable / price) if price > 0 else 0.0
 
         min_amount = math.ceil((min_notional * 1.15) / price / step_size) * step_size
@@ -198,7 +199,7 @@ class CapitalAllocator:
                         rebalance_needed = False
                 else:
                     buy_amt = math.floor(rebalance_value / price / step_size) * step_size
-                    if buy_amt >= min_amount and buy_amt * price <= quote_free:
+                    if buy_amt >= min_amount and buy_amt * price <= quote_free_pp:
                         rebalance_action = {"side": "buy", "amount": buy_amt, "pair": pair}
                     else:
                         rebalance_needed = False
