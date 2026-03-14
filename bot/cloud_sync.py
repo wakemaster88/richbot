@@ -52,6 +52,14 @@ class CloudSync:
             logger.info("Cloud sync disabled (not configured)")
             return
 
+        self._running = True
+        await self._connect()
+        self._tasks = [
+            asyncio.create_task(self._heartbeat_loop()),
+            asyncio.create_task(self._command_loop()),
+        ]
+
+    async def _connect(self) -> bool:
         try:
             self._pool = await asyncpg.create_pool(
                 dsn=self.config.database_url,
@@ -61,22 +69,28 @@ class CloudSync:
                 command_timeout=15,
             )
             await self._ensure_schema()
-            self._running = True
             self._status = "running"
             await self.send_heartbeat()
-            self._tasks = [
-                asyncio.create_task(self._heartbeat_loop()),
-                asyncio.create_task(self._command_loop()),
-            ]
             logger.info("Cloud sync connected (bot_id=%s)", self.bot_id)
+            return True
         except Exception as e:
-            logger.error("Cloud sync start failed: %s", e)
+            logger.error("Cloud sync connection failed: %s", e)
             if self._pool:
                 try:
                     await self._pool.close()
                 except Exception:
                     pass
                 self._pool = None
+            return False
+
+    async def _reconnect(self) -> bool:
+        if self._pool:
+            try:
+                await self._pool.close()
+            except Exception:
+                pass
+            self._pool = None
+        return await self._connect()
 
     async def fetch_env(self, force: bool = False) -> dict[str, str]:
         """Fetch secrets from Neon and inject into os.environ. Returns loaded keys."""
@@ -130,9 +144,9 @@ class CloudSync:
         """Register a handler for a command type (sync or async callable)."""
         self._command_handlers[command_type] = handler
 
-    async def send_heartbeat(self):
+    async def send_heartbeat(self) -> bool:
         if not self._pool:
-            return
+            return False
         try:
             uptime = int(time.time() - self._start_time)
             mem = await asyncio.to_thread(self._get_system_info)
@@ -156,8 +170,10 @@ class CloudSync:
                     json.dumps(self._pairs), json.dumps(self._metrics),
                     self._start_time, git_ver,
                 )
+            return True
         except Exception as e:
             logger.warning("Heartbeat failed: %s", e)
+            return False
 
     async def sync_trade(self, trade):
         """Sync a TradeRecord to Neon."""
@@ -303,13 +319,36 @@ class CloudSync:
     # -- Internal loops --
 
     async def _heartbeat_loop(self):
+        _fails = 0
         while self._running:
-            await self.send_heartbeat()
+            try:
+                if not self._pool:
+                    _fails += 1
+                    if _fails >= 3:
+                        logger.info("Cloud disconnected — attempting reconnect...")
+                        await self._reconnect()
+                        _fails = 0
+                else:
+                    ok = await self.send_heartbeat()
+                    if ok:
+                        _fails = 0
+                    else:
+                        _fails += 1
+                        if _fails >= 3:
+                            logger.warning("%d consecutive heartbeat failures — reconnecting", _fails)
+                            await self._reconnect()
+                            _fails = 0
+            except Exception as e:
+                logger.warning("Heartbeat loop error: %s", e)
+                _fails += 1
             await asyncio.sleep(self.config.heartbeat_interval)
 
     async def _command_loop(self):
         while self._running:
-            await self._process_commands()
+            try:
+                await self._process_commands()
+            except Exception as e:
+                logger.warning("Command loop error: %s", e)
             await asyncio.sleep(self.config.command_poll_interval)
 
     async def _process_commands(self):
@@ -501,7 +540,10 @@ CREATE TABLE IF NOT EXISTS trades (
     fee DOUBLE PRECISION NOT NULL,
     pnl DOUBLE PRECISION NOT NULL,
     grid_level DOUBLE PRECISION,
-    order_id TEXT
+    order_id TEXT,
+    fill_price DOUBLE PRECISION,
+    slippage_bps DOUBLE PRECISION,
+    is_maker BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_tr_bot_pair_ts ON trades(bot_id, pair, timestamp DESC);
 
@@ -561,4 +603,8 @@ CREATE TABLE IF NOT EXISTS bot_events (
 );
 CREATE INDEX IF NOT EXISTS idx_bot_events_ts ON bot_events (bot_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_events_cat ON bot_events (bot_id, category, timestamp DESC);
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS fill_price DOUBLE PRECISION;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS slippage_bps DOUBLE PRECISION;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS is_maker BOOLEAN;
 """

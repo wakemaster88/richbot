@@ -100,7 +100,7 @@ function ControlPanelBase({
 
       for (let i = 0; i < 20; i++) {
         await new Promise((r) => setTimeout(r, 1500));
-        const check = await fetch(`/api/commands?limit=1`, { cache: "no-store" });
+        const check = await fetch(`/api/commands?limit=10`, { cache: "no-store" });
         const list = await check.json();
         const found = (list as CommandRecord[]).find((c) => c.id === cmdId);
         if (!found || found.status === "pending") continue;
