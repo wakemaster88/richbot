@@ -537,29 +537,29 @@ class PairBot:
             balance = await asyncio.to_thread(self.exchange.fetch_account_balances)
 
             quote_bal = balance.get(self.quote, {})
-            base = self.pair.split("/")[0]
-            base_bal = balance.get(base, {})
+            base_sym = self.pair.split("/")[0]
+            base_bal = balance.get(base_sym, {})
             usdt = quote_bal.get("total", 0)
+            base_total = base_bal.get("total", 0)
+            base_value = base_total * (self.current_price or 0)
+            total_equity = usdt + base_value
             logger.info(
-                "%s Equity — %s: %.4f | %s: %.8f (≈%.2f %s)",
+                "%s Equity — %s: %.4f | %s: %.8f (≈%.2f %s) | Total: %.2f",
                 self.pair, self.quote, usdt,
-                base, base_bal.get("total", 0),
-                base_bal.get("total", 0) * (self.current_price or 0), self.quote,
+                base_sym, base_total, base_value, self.quote, total_equity,
             )
-            self.tracker.update_equity(self.pair, usdt)
+            self.tracker.update_equity(self.pair, total_equity)
 
             if self.cloud and self.cloud.connected:
-                await self.cloud.sync_equity(self.pair, usdt)
+                await self.cloud.sync_equity(self.pair, total_equity)
 
-            self.risk.update_equity(usdt)
+            self.risk.update_equity(total_equity)
 
             old_cb = self.cb.get_level(self.pair)
-            new_cb = self.cb.update_equity(self.pair, usdt)
+            new_cb = self.cb.update_equity(self.pair, total_equity)
 
             cb_status = self.cb.get_pair_status(self.pair)
             dd_pct = cb_status["drawdown_pct"]
-            if dd_pct >= 3 and self.alert_manager:
-                asyncio.create_task(self.alert_manager.alert_drawdown(self.pair, dd_pct, usdt))
             if new_cb > old_cb:
                 cb_name = {CBLevel.YELLOW: "YELLOW", CBLevel.ORANGE: "ORANGE", CBLevel.RED: "RED"}.get(new_cb, "?")
                 if new_cb == CBLevel.RED:
@@ -724,6 +724,8 @@ class MultiPairBot:
         self.ws: WebSocketClient | None = None
         self.pair_bots: dict[str, PairBot] = {}
         self._running = False
+        self._last_raw_amount: dict[str, float] = {}
+        self._last_grid_rebuild: dict[str, float] = {}
 
     async def start(self):
         """Start trading all configured pairs."""
@@ -923,6 +925,8 @@ class MultiPairBot:
         for pair, bot in self.pair_bots.items():
             try:
                 await bot.initialize(self.allocator, pair_count, saved_state)
+                self._last_raw_amount[pair] = bot.pair_amount
+                self._last_grid_rebuild[pair] = time.time()
             except Exception as e:
                 logger.error("Failed to initialize %s [%s]: %s", pair, type(e).__name__, e or "(kein Detail)")
                 import traceback
@@ -1954,16 +1958,25 @@ class MultiPairBot:
 
                 old_buy = bot.pair_buy_count
                 old_sell = bot.pair_sell_count
-                old_amount = bot.pair_amount
+                old_raw = self._last_raw_amount.get(pair, 0)
                 new_total = alloc.buy_count + alloc.sell_count
                 old_total = old_buy + old_sell
 
-                changed = (
+                now = time.time()
+                min_rebuild_interval = 900
+                last_rebuild = self._last_grid_rebuild.get(pair, 0)
+                cooldown_ok = (now - last_rebuild) >= min_rebuild_interval
+
+                counts_changed = (
                     abs(new_total - old_total) >= 2
                     or abs(alloc.buy_count - old_buy) >= 1
                     or abs(alloc.sell_count - old_sell) >= 1
-                    or (old_amount > 0 and abs(alloc.amount_per_order - old_amount) / old_amount > 0.15)
                 )
+                amount_changed = (
+                    old_raw > 0
+                    and abs(alloc.amount_per_order - old_raw) / old_raw > 0.30
+                )
+                changed = counts_changed or (amount_changed and cooldown_ok)
 
                 if changed and new_total >= 2:
                     import math as _m
@@ -1974,6 +1987,8 @@ class MultiPairBot:
                         alloc.buy_count = max(1, round(rp.max_levels * ratio))
                         alloc.sell_count = rp.max_levels - alloc.buy_count
                         alloc.grid_count = rp.max_levels
+
+                    self._last_raw_amount[pair] = alloc.amount_per_order
 
                     alloc.buy_budget *= rp.size_mult
                     alloc.sell_budget *= rp.size_mult
@@ -2023,6 +2038,7 @@ class MultiPairBot:
                     bot._apply_inventory_skew(rp_a.target_ratio)
                     await bot.order_mgr.place_grid_orders(pair, bot._entry_filter_dict())
 
+                    self._last_grid_rebuild[pair] = now
                     logger.info(
                         "%s Auto-Grid: %dB+%dS → %dB+%dS, avg %.8f/Order (Equity: %.2f, Regime: %s)",
                         pair, old_buy, old_sell, alloc.buy_count, alloc.sell_count,
