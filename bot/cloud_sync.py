@@ -120,14 +120,26 @@ class CloudSync:
     async def stop(self):
         self._running = False
         self._status = "stopped"
-        try:
-            await self.send_heartbeat()
-        except Exception:
-            pass
         for task in self._tasks:
             task.cancel()
+        for task in self._tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._tasks.clear()
+        try:
+            await asyncio.wait_for(self.send_heartbeat(), timeout=5)
+        except Exception:
+            pass
         if self._pool:
-            await self._pool.close()
+            try:
+                await asyncio.wait_for(self._pool.close(), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("Pool close timed out — terminating connections")
+                self._pool.terminate()
+            except Exception:
+                pass
             self._pool = None
         logger.info("Cloud sync stopped")
 
